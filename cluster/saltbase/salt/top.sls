@@ -31,7 +31,7 @@ base:
 {% endif %}
 {% if pillar.get('policy_provider', '').lower() == 'calico' %}
     - calico.node
-{% endif %|}}
+{% endif %}
 {% if pillar.get('enable_node_logging', '').lower() == 'true' and pillar['logging_destination'] is defined %}
   {% if pillar['logging_destination'] == 'elasticsearch' %}
     - fluentd-es
@@ -59,7 +59,7 @@ base:
 {% endif %}
 {% if pillar.get('policy_provider', '').lower() == 'calico' %}
     - calico.master
-{% endif %|}}
+{% endif %}
     - kube-apiserver
     - kube-controller-manager
     - kube-scheduler
