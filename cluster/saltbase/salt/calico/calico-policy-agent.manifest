@@ -28,4 +28,4 @@ spec:
           imagePullPolicy: Always
           env:
           - name: ETCD_ENDPOINTS
-            value: "http://{{ grains.api_servers }}:6666"
+            value: "http://{{ grains.id }}:6666"
