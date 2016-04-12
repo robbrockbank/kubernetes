@@ -27,9 +27,9 @@ calico-etcd:
                --data-dir /var/etcd/calico-data
                --advertise-client-urls http://{{ grains.id }}:6666
                --listen-client-urls http://0.0.0.0:6666
-               --listen-peer-urls http://0.0.0.0:2380
-               --initial-advertise-peer-urls http://{{ grains.id }}:2380
-               --initial-cluster calico=http://{{ grains.id }}:2380
+               --listen-peer-urls http://0.0.0.0:6667
+               --initial-advertise-peer-urls http://{{ grains.id }}:6667
+               --initial-cluster calico=http://{{ grains.id }}:6667
 
 calico-node:
   cmd.run:

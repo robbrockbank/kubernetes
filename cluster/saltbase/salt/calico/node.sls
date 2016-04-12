@@ -27,7 +27,6 @@ calico-node:
       - kmod: xt_set
       - service: docker
       - file: calicoctl
-      - cmd: calico-etcd
 
 calico-cni:
   file.managed:
