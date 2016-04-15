@@ -49,9 +49,18 @@ calico-restart-kubelet:
     - name: service kubelet restart
     - require:
       - file: calico-cni
+      - file: host-local
       - file: calico-cni-config
       - cmd: calico-node
       - service: kubelet
+
+host-local:
+  file.managed:
+    - name: /opt/cni/bin/host-local
+    - source: https://f001.backblaze.com/file/calico/host-local
+    - source_hash: sha256=0eb6324764cd651072d53094808d6d15c4acb5c46a5d55d70edb0395309ee928
+    - makedirs: True
+    - mode: 744
 
 ip6_tables:
   kmod.present

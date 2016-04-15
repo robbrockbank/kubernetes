@@ -31,6 +31,7 @@ base:
 {% endif %}
 {% if pillar.get('policy_provider', '').lower() == 'calico' %}
     - calico.node
+    - cni
 {% endif %}
 {% if pillar.get('enable_node_logging', '').lower() == 'true' and pillar['logging_destination'] is defined %}
   {% if pillar['logging_destination'] == 'elasticsearch' %}
