@@ -36,7 +36,7 @@ func CreateServerPod(namespace *api.Namespace, port int) *api.Pod {
     pod := &api.Pod{
         ObjectMeta: api.ObjectMeta{
 			Name:      "np-server-" + string(util.NewUUID()),
-			Namespace: namespace,
+			Namespace: namespace.Name,
 			Annotations: map[string]string{},
 		},
         Spec: api.PodSpec{
@@ -65,7 +65,7 @@ func NetworkIsolationEnableDisable(f *Framework) {
 	Expect(err).NotTo(HaveOccurred())
 
     podClient := f.Client.Pods(ns1.Name)
-	pod := CreateServerPod(ns1.Name, 80)
+	pod := CreateServerPod(ns1, 80)
 
 	// Create a pod (with a deferred cleanup delete)
     defer func() {
