@@ -92,5 +92,5 @@ func NetworkIsolationEnableDisable(f *Framework) {
 	}
 
 	By("======SLEEPING======")
-	time.sleep(1000 * time.Second)
+	time.Sleep(1000 * time.Second)
 }
