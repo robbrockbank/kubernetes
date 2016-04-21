@@ -57,7 +57,7 @@ func CreateServerPod(namespace, port) *api.Pod {
                     Image: "gcr.io/google_containers/test-webserver:e2e",
                     Ports: []api.ContainerPort{
                         {
-                            ContainerPort: port
+                            ContainerPort: port,
                         },
                     },
                 },
