@@ -17,14 +17,8 @@ limitations under the License.
 package e2e
 
 import (
-	"fmt"
-	"time"
-
 	"k8s.io/kubernetes/pkg/api"
-	client "k8s.io/kubernetes/pkg/client/unversioned"
-	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/util"
-	"k8s.io/kubernetes/pkg/util/wait"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
@@ -38,17 +32,12 @@ var _ = KubeDescribe("NetworkPolicy", func() {
 	})
 })
 
-func CreateServerPod(namespace *api.Namespace, port) *api.Pod {
+func CreateServerPod(namespace *api.Namespace, port int) *api.Pod {
     pod := &api.Pod{
-        TypeMeta: unversioned.TypeMeta{
-			Kind:       "Pod",
-			APIVersion: registered.GroupOrDie(api.GroupName).GroupVersion.String(),
-        },
         ObjectMeta: api.ObjectMeta{
 			Name:      "np-server-" + string(util.NewUUID()),
 			Namespace: namespace,
-			Annotations: map[string]string{
-			},
+			Annotations: map[string]string{},
 		},
         Spec: api.PodSpec{
             Containers: []api.Container{
