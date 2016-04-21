@@ -60,6 +60,7 @@ base:
 {% endif %}
 {% if pillar.get('policy_provider', '').lower() == 'calico' %}
     - calico.master
+    - cni
 {% endif %}
     - kube-apiserver
     - kube-controller-manager
