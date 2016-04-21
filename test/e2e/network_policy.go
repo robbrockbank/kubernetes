@@ -17,6 +17,8 @@ limitations under the License.
 package e2e
 
 import (
+	time
+
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/util"
 
@@ -67,6 +69,8 @@ func NetworkIsolationEnableDisable(f *Framework) {
     podClient := f.Client.Pods(ns1.Name)
 	pod := CreateServerPod(ns1, 80)
 
+	pod2 := CreateServerPod(ns2, 443)
+
 	// Create a pod (with a deferred cleanup delete)
     defer func() {
 		By("deleting the pod")
@@ -76,4 +80,16 @@ func NetworkIsolationEnableDisable(f *Framework) {
 	if _, err := podClient.Create(pod); err != nil {
 		Failf("Failed to create %s pod: %v", pod.Name, err)
 	}
+
+    defer func() {
+		By("deleting the pod")
+		defer GinkgoRecover()
+		podClient.Delete(pod2.Name, api.NewDeleteOptions(0))
+	}()
+	if _, err := podClient.Create(pod2); err != nil {
+		Failf("Failed to create %s pod: %v", pod2.Name, err)
+	}
+
+	By("======SLEEPING======")
+	time.sleep(1000 * time.Second)
 }
