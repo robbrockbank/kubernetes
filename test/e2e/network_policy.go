@@ -29,7 +29,7 @@ import (
 var _ = KubeDescribe("NetworkPolicy", func() {
 	f := NewDefaultFramework("network-policy")
 
-	It("should isolate containers when NetworkIsolation is enabled", func() {
+	It("should isolate containers when NetworkIsolation is enabled [Policy]", func() {
         NetworkIsolationEnableDisable(f)
 	})
 })
