@@ -17,48 +17,47 @@ limitations under the License.
 package e2e
 
 import (
-	"time"
-
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/util"
+	"k8s.io/kubernetes/test/e2e/framework"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 )
 
-var _ = KubeDescribe("NetworkPolicy", func() {
-	f := NewDefaultFramework("network-policy")
+var _ = framework.KubeDescribe("NetworkPolicy", func() {
+	f := framework.NewDefaultFramework("network-policy")
 
 	It("should isolate containers when NetworkIsolation is enabled [Policy]", func() {
-        NetworkIsolationEnableDisable(f)
+	NetworkIsolationEnableDisable(f)
 	})
 })
 
 func CreateServerPod(namespace *api.Namespace, port int) *api.Pod {
-    pod := &api.Pod{
-        ObjectMeta: api.ObjectMeta{
+	pod := &api.Pod{
+		ObjectMeta: api.ObjectMeta{
 			Name:      "np-server-" + string(util.NewUUID()),
 			Namespace: namespace.Name,
 			Annotations: map[string]string{},
 		},
-        Spec: api.PodSpec{
-            Containers: []api.Container{
-                {
-                    Name: "webserver",
-                    Image: "gcr.io/google_containers/test-webserver:e2e",
-                    Ports: []api.ContainerPort{
-                        {
-                            ContainerPort: port,
-                        },
-                    },
-                },
-            },
-        },
-    }
-    return pod
+		Spec: api.PodSpec{
+			Containers: []api.Container{
+				{
+					Name: "webserver",
+					Image: "gcr.io/google_containers/test-webserver:e2e",
+					Ports: []api.ContainerPort{
+						{
+							ContainerPort: port,
+						},
+					},
+				},
+			},
+		},
+	}
+	return pod
 }
 
-func NetworkIsolationEnableDisable(f *Framework) {
+func NetworkIsolationEnableDisable(f *framework.Framework) {
 	// We need two namespaces, so create a second one.
 	ns1 := f.Namespace
 	ns2, err := f.CreateNamespace(f.BaseName + "2", map[string]string{
@@ -66,31 +65,37 @@ func NetworkIsolationEnableDisable(f *Framework) {
 	})
 	Expect(err).NotTo(HaveOccurred())
 
-    podClient := f.Client.Pods(ns1.Name)
+	podClient := f.Client.Pods(ns1.Name)
 	pod := CreateServerPod(ns1, 80)
 
 	podClient2 := f.Client.Pods(ns2.Name)
 	pod2 := CreateServerPod(ns2, 443)
 
 	// Create a pod (with a deferred cleanup delete)
-    defer func() {
+	defer func() {
 		By("deleting the pod")
 		defer GinkgoRecover()
 		podClient.Delete(pod.Name, api.NewDeleteOptions(0))
 	}()
+
 	if _, err := podClient.Create(pod); err != nil {
-		Failf("Failed to create %s pod: %v", pod.Name, err)
+		framework.Failf("Failed to create %s pod: %v", pod.Name, err)
 	}
 
-    defer func() {
+	defer func() {
 		By("deleting the pod")
 		defer GinkgoRecover()
 		podClient2.Delete(pod2.Name, api.NewDeleteOptions(0))
 	}()
+
 	if _, err := podClient2.Create(pod2); err != nil {
-		Failf("Failed to create %s pod: %v", pod2.Name, err)
+		framework.Failf("Failed to create %s pod: %v", pod2.Name, err)
 	}
 
-	By("======SLEEPING======")
-	time.Sleep(1000 * time.Second)
+	By("waiting for pod 1 to be running")
+	err = f.WaitForPodRunning(pod.Name)
+	Expect(err).NotTo(HaveOccurred())
+	By("waiting for pod 2 to be running")
+	err = f.WaitForPodRunning(pod2.Name)
+	Expect(err).NotTo(HaveOccurred())
 }
