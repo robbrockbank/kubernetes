@@ -93,9 +93,9 @@ func NetworkIsolationEnableDisable(f *framework.Framework) {
 	}
 
 	By("waiting for pod 1 to be running")
-	err = f.WaitForPodRunning(pod.Name)
+	err = WaitForPodRunningInNamespace(f.Client, pod.Name, ns1.Name)
 	Expect(err).NotTo(HaveOccurred())
 	By("waiting for pod 2 to be running")
-	err = f.WaitForPodRunning(pod2.Name)
+	err = WaitForPodRunningInNamespace(f.Client, pod2.Name, ns2.Name)
 	Expect(err).NotTo(HaveOccurred())
 }
