@@ -169,7 +169,7 @@ func createPod(f *framework.Framework,
 podNamespace *api.Namespace, peerNamespace *api.Namespace,
 podServiceName string, peerServiceName string,
 numPeers int, node *api.Node, version string) string {
-	pod, err := f.Client.Pods(podNamespace).Create(&api.Pod{
+	pod, err := f.Client.Pods(podNamespace.Name).Create(&api.Pod{
 		ObjectMeta: api.ObjectMeta{
 			GenerateName: podServiceName + "-",
 			Labels: map[string]string{
