@@ -339,13 +339,8 @@ func setNetworkIsolationAnnotations(f *framework.Framework, namespace *api.Names
 		annotations["net.alpha.kubernetes.io/network-isolation"] = "no"
 	}
 
-	// Create a new namespace object that we'll use for the update.
-	namespaceObj := &api.Namespace{
-		ObjectMeta: api.ObjectMeta{
-			Annotations:       annotations,
-		},
-	}
-
-	_, err := c.Namespaces().Create(namespaceObj)
+	// Update the namespace
+	namespace.ObjectMeta.Annotations = annotations
+	_, err := f.Client.Namespaces().Update(namespace)
 	Expect(err).NotTo(HaveOccurred())
 }
