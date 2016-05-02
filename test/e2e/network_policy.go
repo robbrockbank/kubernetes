@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,85 +17,330 @@ limitations under the License.
 package e2e
 
 import (
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/util"
+	"k8s.io/kubernetes/pkg/util/intstr"
 	"k8s.io/kubernetes/test/e2e/framework"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 )
 
-var _ = framework.KubeDescribe("NetworkPolicy1", func() {
-	f := framework.NewDefaultFramework("network-policy1")
+/*
+These Network Policy tests create two services "local" and "remote".
+There is a single pod in the local service, and a single pod on each node in
+the remote service.
+
+Each pod is running nettest container:
+-  The local pod uses service discovery to locate the remote pods and waits
+   to establish communication (if expected) with those pods.
+-  Each remote pod uses service discovery to locate the local pod and waits to
+   establish communication (if expected) with that pod.
+
+We run a number of permutations of the following:
+-  Policy on, or off.  When policy is on we expect isolation between the
+   namespaces.
+-  Policy on, but with rules allowing communication between the namespaces.
+-  Both services in the same namespace (so should never be isolated)
+-  Both services in different namespaces (so will be isolated based on policy)
+ */
+
+// Define the names of the two services
+var localServiceName = "network-policy-local"
+var remoteServiceName = "network-policy-remote"
+
+var _ = framework.KubeDescribe("NetworkPolicy", func() {
+	f := framework.NewDefaultFramework("network-policy")
+
+	BeforeEach(func() {
+		//Assert basic external connectivity.
+		//Since this is not really a test of kubernetes in any way, we
+		//leave it as a pre-test assertion, rather than a Gingko test.
+		By("Executing a successful http request from the external internet")
+		resp, err := http.Get("http://google.com")
+		if err != nil {
+			framework.Failf("Unable to connect/talk to the internet: %v", err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			framework.Failf("Unexpected error code, expected 200, got, %v (%v)", resp.StatusCode, resp)
+		}
+	})
+
+	It("should provide Internet connection for containers [Conformance]", func() {
+		By("Running container which tries to wget google.com")
+		framework.ExpectNoError(framework.CheckConnectivityToHost(f, "", "wget-test", "google.com", 30))
+	})
 
 	It("should isolate containers when NetworkIsolation is enabled [Policy]", func() {
-	NetworkIsolationEnableDisable(f)
+		runTests(f)
 	})
 })
 
-func CreateServerPod(namespace *api.Namespace, port int) *api.Pod {
-	pod := &api.Pod{
-		ObjectMeta: api.ObjectMeta{
-			Name:      "np-server-" + string(util.NewUUID()),
-			Namespace: namespace.Name,
-			Annotations: map[string]string{},
-		},
-		Spec: api.PodSpec{
-			Containers: []api.Container{
-				{
-					Name: "webserver",
-					Image: "gcr.io/google_containers/test-webserver:e2e",
-					Ports: []api.ContainerPort{
-						{
-							ContainerPort: port,
-						},
-					},
-				},
-			},
-		},
-	}
-	return pod
-}
-
-func NetworkIsolationEnableDisable(f *framework.Framework) {
-	// We need two namespaces, so create a second one.
+func runTests(f *framework.Framework) {
+	// These tests use two namespaces.  A single namespace is created by
+	// default.  Create another and store both separately for clarity.
 	ns1 := f.Namespace
 	ns2, err := f.CreateNamespace(f.BaseName + "2", map[string]string{
 		"e2e-framework": f.BaseName + "2",
 	})
 	Expect(err).NotTo(HaveOccurred())
 
-	podClient := f.Client.Pods(ns1.Name)
-	pod := CreateServerPod(ns1, 80)
+	// Get the available nodes.
+	nodes, err := framework.GetReadyNodes(f)
+	framework.ExpectNoError(err)
 
-	podClient2 := f.Client.Pods(ns2.Name)
-	pod2 := CreateServerPod(ns2, 443)
-
-	// Create a pod (with a deferred cleanup delete)
-	defer func() {
-		By("deleting the pod")
-		defer GinkgoRecover()
-		podClient.Delete(pod.Name, api.NewDeleteOptions(0))
-	}()
-
-	if _, err := podClient.Create(pod); err != nil {
-		framework.Failf("Failed to create %s pod: %v", pod.Name, err)
+	if len(nodes.Items) == 1 {
+		// in general, the test requires two nodes. But for local development, often a one node cluster
+		// is created, for simplicity and speed. (see issue #10012). We permit one-node test
+		// only in some cases
+		if !framework.ProviderIs("local") {
+			framework.Failf(fmt.Sprintf("The test requires two Ready nodes on %s, but found just one.", framework.TestContext.Provider))
+		}
+		framework.Logf("Only one ready node is detected. The test has limited scope in such setting. " +
+		"Rerun it with at least two nodes to get complete coverage.")
 	}
 
+	// No policy applied, there should be no isolation between services in
+	// different namespaces.
+	networkPolicyTest(f, ns1, ns2, nodes, false, false, false)
+
+	// Enable isolation.  We expect isolation between different namespaces,
+	// but not within a namespace.
+	networkPolicyTest(f, ns1, ns1, nodes, true, false, false)
+	networkPolicyTest(f, ns1, ns2, nodes, true, false, true)
+}
+
+
+func networkPolicyTest(f *framework.Framework, localNamespace *api.Namespace, remoteNamespace *api.Namespace, nodes *api.NodeList,
+			enableIsolation bool, installRules bool, expectIsolation bool) {
+	var err error
+
+	setNetworkIsolationAnnotations(f, localNamespace, enableIsolation)
+	setNetworkIsolationAnnotations(f, remoteNamespace, enableIsolation)
+
+	// Create a "local" service and a "remote" service.  These are really just used
+	// for pod discovery by the nettest containers.
+	localService := createService(f, localNamespace, localServiceName)
+	remoteService := createService(f, remoteNamespace, remoteServiceName)
+
+	// Clean up services
 	defer func() {
-		By("deleting the pod")
-		defer GinkgoRecover()
-		podClient2.Delete(pod2.Name, api.NewDeleteOptions(0))
+		By("Cleaning up the local service")
+		if err = f.Client.Services(localNamespace.Name).Delete(localService.Name); err != nil {
+			framework.Failf("unable to delete svc %v: %v", localService.Name, err)
+		}
+	}()
+	defer func() {
+		By("Cleaning up the remote service")
+		if err = f.Client.Services(remoteNamespace.Name).Delete(remoteService.Name); err != nil {
+			framework.Failf("unable to delete svc %v: %v", remoteService.Name, err)
+		}
 	}()
 
-	if _, err := podClient2.Create(pod2); err != nil {
-		framework.Failf("Failed to create %s pod: %v", pod2.Name, err)
+	By("Creating a webserver (pending) pod on each node")
+
+	localPodName, remotePodNames := launchNetTestPods(f, localNamespace, remoteNamespace, nodes, "1.8")
+
+	// Deferred clean up of the pods.
+	defer func() {
+		By("Cleaning up the webserver pods")
+		if err = f.Client.Pods(localNamespace.Name).Delete(localPodName, nil); err != nil {
+			framework.Logf("Failed to delete pod %s: %v", localPodName, err)
+		}
+		for _, podName := range remotePodNames {
+			if err = f.Client.Pods(remoteNamespace.Name).Delete(podName, nil); err != nil {
+				framework.Logf("Failed to delete pod %s: %v", podName, err)
+			}
+		}
+	}()
+
+	// Wait for all pods to be running.
+	By(fmt.Sprintf("Waiting for pod %q to be running", localPodName))
+	err = framework.WaitForPodRunningInNamespace(f.Client, localPodName, localNamespace.Name)
+	Expect(err).NotTo(HaveOccurred())
+	for _, podName := range remotePodNames {
+		By(fmt.Sprintf("Waiting for pod %q to be running", podName))
+		err = framework.WaitForPodRunningInNamespace(f.Client, podName, remoteNamespace.Name)
+		Expect(err).NotTo(HaveOccurred())
 	}
 
-	//By("waiting for pod 1 to be running")
-	//err = WaitForPodRunningInNamespace(f.Client, pod.Name, ns1.Name)
-	//Expect(err).NotTo(HaveOccurred())
-	//By("waiting for pod 2 to be running")
-	//err = WaitForPodRunningInNamespace(f.Client, pod2.Name, ns2.Name)
-	//Expect(err).NotTo(HaveOccurred())
+	testConnectivity(f, localNamespace, localService.Name)
+	testConnectivity(f, remoteNamespace, remoteService.Name)
+}
+
+func createService(f *framework.Framework, namespace *api.Namespace, name string) (*api.Service) {
+	By(fmt.Sprintf("Creating a service named %q in namespace %q", name, namespace.Name))
+	svc, err := f.Client.Services(namespace.Name).Create(&api.Service{
+		ObjectMeta: api.ObjectMeta{
+			Name: name,
+			Labels: map[string]string{
+				"name": name,
+			},
+		},
+		Spec: api.ServiceSpec{
+			Ports: []api.ServicePort{{
+				Protocol:   "TCP",
+				Port:       8080,
+				TargetPort: intstr.FromInt(8080),
+			}},
+			Selector: map[string]string{
+				"name": name,
+			},
+		},
+	})
+	if err != nil {
+		framework.Failf("unable to create test service named [%s] %v", svc.Name, err)
+	}
+	return svc
+}
+
+func launchNetTestPods(f *framework.Framework, localNamespace *api.Namespace, remoteNamespace *api.Namespace, nodes *api.NodeList, version string) (string, []string) {
+	remotePodNames := []string{}
+
+	totalRemotePods := len(nodes.Items)
+
+	Expect(totalRemotePods).NotTo(Equal(0))
+
+	// Create the local pod on the first node.  It will find all of the remote
+	// pods (one for each node).
+	localPodName := createPod(f, localNamespace, remoteNamespace, localServiceName, remoteServiceName, totalRemotePods, &nodes.Items[0], version)
+
+	// Now create the remote pods, one on each node - each should just search
+	// for the single local pod peer.
+	for _, node := range nodes.Items {
+		podName := createPod(f, remoteNamespace, localNamespace, remoteServiceName, localServiceName, 1, &node, version)
+		remotePodNames = append(remotePodNames, podName)
+	}
+
+	return localPodName, remotePodNames
+}
+
+func createPod(f *framework.Framework,
+		podNamespace *api.Namespace, peerNamespace *api.Namespace,
+		podServiceName string, peerServiceName string,
+		numPeers int, node *api.Node, version string) string {
+	pod, err := f.Client.Pods(podNamespace.Name).Create(&api.Pod{
+		ObjectMeta: api.ObjectMeta{
+			GenerateName: podServiceName + "-",
+			Labels: map[string]string{
+				"name": podServiceName,
+			},
+		},
+		Spec: api.PodSpec{
+			Containers: []api.Container{
+				{
+					Name:  "webserver",
+					Image: "gcr.io/google_containers/nettest:" + version,
+					Args: []string{
+						"-service=" + peerServiceName,
+						// peers >= totalRemotePods should be asserted by the container.
+						// the nettest container finds peers by looking up list of svc endpoints.
+						// The local pod searches for the remote pods.
+						fmt.Sprintf("-peers=%d", numPeers),
+						"-namespace=" + peerNamespace.Name},
+					Ports: []api.ContainerPort{{ContainerPort: 8080}},
+				},
+			},
+			NodeName:      node.Name,
+			RestartPolicy: api.RestartPolicyNever,
+		},
+	})
+	Expect(err).NotTo(HaveOccurred())
+	framework.Logf("Created pod %s on node %s", pod.ObjectMeta.Name, node.Name)
+
+	return pod.ObjectMeta.Name
+}
+
+
+func testConnectivity(f *framework.Framework, namespace *api.Namespace, serviceName string) {
+	By("Waiting for connectivity to be verified")
+	passed := false
+
+	//once response OK, evaluate response body for pass/fail.
+	var err error
+	var body []byte
+	getDetails := func() ([]byte, error) {
+		proxyRequest, errProxy := framework.GetServicesProxyRequest(f.Client, f.Client.Get())
+		if errProxy != nil {
+			return nil, errProxy
+		}
+		return proxyRequest.Namespace(namespace.Name).
+			Name(serviceName).
+			Suffix("read").
+			DoRaw()
+	}
+
+	getStatus := func() ([]byte, error) {
+		proxyRequest, errProxy := framework.GetServicesProxyRequest(f.Client, f.Client.Get())
+		if errProxy != nil {
+			return nil, errProxy
+		}
+		return proxyRequest.Namespace(namespace.Name).
+			Name(serviceName).
+			Suffix("status").
+			DoRaw()
+	}
+
+	// nettest containers will wait for all service endpoints to come up for 2 minutes
+	// apply a 3 minutes observation period here to avoid this test to time out before the nettest starts to contact peers
+	timeout := time.Now().Add(3 * time.Minute)
+	for i := 0; !passed && timeout.After(time.Now()); i++ {
+		time.Sleep(2 * time.Second)
+		framework.Logf("About to make a proxy status call")
+		start := time.Now()
+		body, err = getStatus()
+		framework.Logf("Proxy status call returned in %v", time.Since(start))
+		if err != nil {
+			framework.Logf("Attempt %v: service/pod still starting. (error: '%v')", i, err)
+			continue
+		}
+		// Finally, we pass/fail the test based on if the container's response body, as to whether or not it was able to find peers.
+		switch {
+		case string(body) == "pass":
+			framework.Logf("Passed on attempt %v. Cleaning up.", i)
+			passed = true
+		case string(body) == "running":
+			framework.Logf("Attempt %v: test still running", i)
+		case string(body) == "fail":
+			if body, err = getDetails(); err != nil {
+				framework.Failf("Failed on attempt %v. Cleaning up. Error reading details: %v", i, err)
+			} else {
+				framework.Failf("Failed on attempt %v. Cleaning up. Details:\n%s", i, string(body))
+			}
+		case strings.Contains(string(body), "no endpoints available"):
+			framework.Logf("Attempt %v: waiting on service/endpoints", i)
+		default:
+			framework.Logf("Unexpected response:\n%s", body)
+		}
+	}
+
+	if !passed {
+		if body, err = getDetails(); err != nil {
+			framework.Failf("Timed out. Cleaning up. Error reading details: %v", err)
+		} else {
+			framework.Failf("Timed out. Cleaning up. Details:\n%s", string(body))
+		}
+	}
+	Expect(string(body)).To(Equal("pass"))
+}
+
+func setNetworkIsolationAnnotations(f *framework.Framework, namespace *api.Namespace, enableIsolation bool) {
+
+	var annotations = map[string]string{}
+	if enableIsolation {
+		By("Enabling isolation through namespace annotations")
+		annotations["net.alpha.kubernetes.io/network-isolation"] = "yes"
+	} else {
+		By("Disabling isolation through namespace annotations")
+		annotations["net.alpha.kubernetes.io/network-isolation"] = "no"
+	}
+
+	// Update the namespace
+	namespace.ObjectMeta.Annotations = annotations
+	_, err := f.Client.Namespaces().Update(namespace)
+	Expect(err).NotTo(HaveOccurred())
 }
