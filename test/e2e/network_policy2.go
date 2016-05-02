@@ -133,6 +133,9 @@ func networkPolicyTest(f *framework.Framework, localNamespace *api.Namespace, re
 			err = framework.WaitForPodRunningInNamespace(f.Client, podName, remoteNamespace.Name)
 			Expect(err).NotTo(HaveOccurred())
 		}
+
+		testConnectivity(f, localNamespace, localService.Name)
+		testConnectivity(f, remoteNamespace, remoteService.Name)
 	})
 }
 
@@ -150,14 +153,14 @@ func launchNetTestPods(f *framework.Framework, localNamespace *api.Namespace, re
 
 	// Create the local pod on the first node.  It will find all of the remote
 	// pods (one for each node).
-	pod = createPod(f, localNamespace, remoteNamespace, localServiceName, remoteServiceName, totalRemotePods, nodes.Items[0], version)
+	pod := createPod(f, localNamespace, remoteNamespace, localServiceName, remoteServiceName, totalRemotePods, &nodes.Items[0], version)
 	localPodName := pod.ObjectMeta.Name
 
 	// Now create the remote pods, one on each node - each should just search
 	// for the single local pod peer.
 	for _, node := range nodes.Items {
-		pod = createPod(f, remoteNamespace, localNamespace, remoteServiceName, localServiceName, 1, node, version)
-		remotePodNames = append(podNames, pod.ObjectMeta.Name)
+		pod = createPod(f, remoteNamespace, localNamespace, remoteServiceName, localServiceName, 1, &node, version)
+		remotePodNames = append(remotePodNames, pod.ObjectMeta.Name)
 	}
 
 	return localPodName, remotePodNames
@@ -223,4 +226,72 @@ func createService(f *framework.Framework, namespace *api.Namespace, name string
 		framework.Failf("unable to create test service named [%s] %v", svc.Name, err)
 	}
 	return svc
+}
+
+func testConnectivity(f *framework.Framework, namespace *api.Namespace, serviceName string) {
+	//once response OK, evaluate response body for pass/fail.
+	var body []byte
+	getDetails := func() ([]byte, error) {
+		proxyRequest, errProxy := framework.GetServicesProxyRequest(f.Client, f.Client.Get())
+		if errProxy != nil {
+			return nil, errProxy
+		}
+		return proxyRequest.Namespace(namespace.Name).
+			Name(serviceName).
+			Suffix("read").
+			DoRaw()
+	}
+
+	getStatus := func() ([]byte, error) {
+		proxyRequest, errProxy := framework.GetServicesProxyRequest(f.Client, f.Client.Get())
+		if errProxy != nil {
+			return nil, errProxy
+		}
+		return proxyRequest.Namespace(namespace.Name).
+			Name(serviceName).
+			Suffix("status").
+			DoRaw()
+	}
+
+	// nettest containers will wait for all service endpoints to come up for 2 minutes
+	// apply a 3 minutes observation period here to avoid this test to time out before the nettest starts to contact peers
+	timeout := time.Now().Add(3 * time.Minute)
+	for i := 0; !passed && timeout.After(time.Now()); i++ {
+		time.Sleep(2 * time.Second)
+		framework.Logf("About to make a proxy status call")
+		start := time.Now()
+		body, err = getStatus()
+		framework.Logf("Proxy status call returned in %v", time.Since(start))
+		if err != nil {
+			framework.Logf("Attempt %v: service/pod still starting. (error: '%v')", i, err)
+			continue
+		}
+		// Finally, we pass/fail the test based on if the container's response body, as to whether or not it was able to find peers.
+		switch {
+		case string(body) == "pass":
+			framework.Logf("Passed on attempt %v. Cleaning up.", i)
+			passed = true
+		case string(body) == "running":
+			framework.Logf("Attempt %v: test still running", i)
+		case string(body) == "fail":
+			if body, err = getDetails(); err != nil {
+				framework.Failf("Failed on attempt %v. Cleaning up. Error reading details: %v", i, err)
+			} else {
+				framework.Failf("Failed on attempt %v. Cleaning up. Details:\n%s", i, string(body))
+			}
+		case strings.Contains(string(body), "no endpoints available"):
+			framework.Logf("Attempt %v: waiting on service/endpoints", i)
+		default:
+			framework.Logf("Unexpected response:\n%s", body)
+		}
+	}
+
+	if !passed {
+		if body, err = getDetails(); err != nil {
+			framework.Failf("Timed out. Cleaning up. Error reading details: %v", err)
+		} else {
+			framework.Failf("Timed out. Cleaning up. Details:\n%s", string(body))
+		}
+	}
+	Expect(string(body)).To(Equal("pass"))
 }
