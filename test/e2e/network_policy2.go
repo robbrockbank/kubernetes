@@ -30,8 +30,26 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-// We have two services.  A local and a remote network policy
-// service.
+/*
+These Network Policy tests create two services "local" and "remote".
+There is a single pod in the local service, and a single pod on each node in
+the remote service.
+
+Each pod is running nettest container:
+-  The local pod uses service discovery to locate the remote pods and waits
+   to establish communication (if expected) with those pods.
+-  Each remote pod uses service discovery to locate the local pod and waits to
+   establish communication (if expected) with that pod.
+
+We run a number of permutations of the following:
+-  Policy on, or off.  When policy is on we expect isolation between the
+   namespaces.
+-  Policy on, but with rules allowing communication between the namespaces.
+-  Both services in the same namespace (so should never be isolated)
+-  Both services in different namespaces (so will be isolated based on policy)
+ */
+
+// Define the names of the two services
 var localServiceName = "network-policy-local"
 var remoteServiceName = "network-policy-remote"
 
@@ -86,12 +104,23 @@ func runTests(f *framework.Framework) {
 		"Rerun it with at least two nodes to get complete coverage.")
 	}
 
-	networkPolicyTest(f, ns1, ns2, nodes)
+	// No policy applied, there should be no isolation between services in
+	// different namespaces.
+	networkPolicyTest(f, ns1, ns2, nodes, false, false, false)
+
+	// Enable isolation.  We expect isolation between different namespaces,
+	// but not within a namespace.
+	networkPolicyTest(f, ns1, ns1, nodes, true, false, false)
+	networkPolicyTest(f, ns1, ns2, nodes, true, false, true)
 }
 
 
-func networkPolicyTest(f *framework.Framework, localNamespace *api.Namespace, remoteNamespace *api.Namespace, nodes *api.NodeList) {
+func networkPolicyTest(f *framework.Framework, localNamespace *api.Namespace, remoteNamespace *api.Namespace, nodes *api.NodeList,
+			enableIsolation bool, installRules bool, expectIsolation bool) {
 	var err error
+
+	setNetworkIsolationAnnotations(f, localNamespace, enableIsolation)
+	setNetworkIsolationAnnotations(f, remoteNamespace, enableIsolation)
 
 	// Create a "local" service and a "remote" service.  These are really just used
 	// for pod discovery by the nettest containers.
@@ -143,11 +172,32 @@ func networkPolicyTest(f *framework.Framework, localNamespace *api.Namespace, re
 	testConnectivity(f, remoteNamespace, remoteService.Name)
 }
 
-// Launch the nettest pods.  This launches:
-// -  A single local service pod on node 0 that finds the remote service pod
-//    peers
-// -  A single remote service pod on all nodes that each find the local service
-//    pod peer
+func createService(f *framework.Framework, namespace *api.Namespace, name string) (*api.Service) {
+	By(fmt.Sprintf("Creating a service named %q in namespace %q", name, namespace.Name))
+	svc, err := f.Client.Services(namespace.Name).Create(&api.Service{
+		ObjectMeta: api.ObjectMeta{
+			Name: name,
+			Labels: map[string]string{
+				"name": name,
+			},
+		},
+		Spec: api.ServiceSpec{
+			Ports: []api.ServicePort{{
+				Protocol:   "TCP",
+				Port:       8080,
+				TargetPort: intstr.FromInt(8080),
+			}},
+			Selector: map[string]string{
+				"name": name,
+			},
+		},
+	})
+	if err != nil {
+		framework.Failf("unable to create test service named [%s] %v", svc.Name, err)
+	}
+	return svc
+}
+
 func launchNetTestPods(f *framework.Framework, localNamespace *api.Namespace, remoteNamespace *api.Namespace, nodes *api.NodeList, version string) (string, []string) {
 	remotePodNames := []string{}
 
@@ -170,9 +220,9 @@ func launchNetTestPods(f *framework.Framework, localNamespace *api.Namespace, re
 }
 
 func createPod(f *framework.Framework,
-podNamespace *api.Namespace, peerNamespace *api.Namespace,
-podServiceName string, peerServiceName string,
-numPeers int, node *api.Node, version string) string {
+		podNamespace *api.Namespace, peerNamespace *api.Namespace,
+		podServiceName string, peerServiceName string,
+		numPeers int, node *api.Node, version string) string {
 	pod, err := f.Client.Pods(podNamespace.Name).Create(&api.Pod{
 		ObjectMeta: api.ObjectMeta{
 			GenerateName: podServiceName + "-",
@@ -205,31 +255,6 @@ numPeers int, node *api.Node, version string) string {
 	return pod.ObjectMeta.Name
 }
 
-func createService(f *framework.Framework, namespace *api.Namespace, name string) (*api.Service) {
-	By(fmt.Sprintf("Creating a service named %q in namespace %q", name, namespace.Name))
-	svc, err := f.Client.Services(namespace.Name).Create(&api.Service{
-		ObjectMeta: api.ObjectMeta{
-			Name: name,
-			Labels: map[string]string{
-				"name": name,
-			},
-		},
-		Spec: api.ServiceSpec{
-			Ports: []api.ServicePort{{
-				Protocol:   "TCP",
-				Port:       8080,
-				TargetPort: intstr.FromInt(8080),
-			}},
-			Selector: map[string]string{
-				"name": name,
-			},
-		},
-	})
-	if err != nil {
-		framework.Failf("unable to create test service named [%s] %v", svc.Name, err)
-	}
-	return svc
-}
 
 func testConnectivity(f *framework.Framework, namespace *api.Namespace, serviceName string) {
 	By("Waiting for connectivity to be verified")
@@ -301,4 +326,26 @@ func testConnectivity(f *framework.Framework, namespace *api.Namespace, serviceN
 		}
 	}
 	Expect(string(body)).To(Equal("pass"))
+}
+
+func setNetworkIsolationAnnotations(f *framework.Framework, namespace *api.Namespace, enableIsolation bool) {
+
+	var annotations = map[string]string{}
+	if enableIsolation {
+		By("Enabling isolation through namespace annotations")
+		annotations["net.alpha.kubernetes.io/network-isolation"] = "yes"
+	} else {
+		By("Disabling isolation through namespace annotations")
+		annotations["net.alpha.kubernetes.io/network-isolation"] = "no"
+	}
+
+	// Create a new namespace object that we'll use for the update.
+	namespaceObj := &api.Namespace{
+		ObjectMeta: api.ObjectMeta{
+			Annotations:       annotations,
+		},
+	}
+
+	_, err := c.Namespaces().Create(namespaceObj)
+	Expect(err).NotTo(HaveOccurred())
 }
