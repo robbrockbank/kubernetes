@@ -25,8 +25,8 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-var _ = framework.KubeDescribe("NetworkPolicy", func() {
-	f := framework.NewDefaultFramework("network-policy")
+var _ = framework.KubeDescribe("NetworkPolicy1", func() {
+	f := framework.NewDefaultFramework("network-policy1")
 
 	It("should isolate containers when NetworkIsolation is enabled [Policy]", func() {
 	NetworkIsolationEnableDisable(f)
