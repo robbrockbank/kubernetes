@@ -73,27 +73,7 @@ func networkPolicyTest(f *framework.Framework, localNamespace *api.Namespace, re
 	// Now we can proceed with the test.
 	It("should function for intra-pod communication [Conformance]", func() {
 
-		// Create a "local" service and a "remote" service.  These are really just used
-		// for pod discovery by the nettest containers.
-		localService := createService(f, localNamespace, localServiceName)
-		remoteService := createService(f, remoteNamespace, remoteServiceName)
-
-		// Clean up services
-		defer func() {
-			By("Cleaning up the local service")
-			if err = f.Client.Services(localNamespace.Name).Delete(localServiceName); err != nil {
-				framework.Failf("unable to delete svc %v: %v", localServiceName, err)
-			}
-		}()
-		defer func() {
-			By("Cleaning up the remote service")
-			if err = f.Client.Services(remoteNamespace.Name).Delete(remoteServiceName); err != nil {
-				framework.Failf("unable to delete svc %v: %v", remoteServiceName, err)
-			}
-		}()
-
-		By("Creating a webserver (pending) pod on each node")
-
+		// Get the available nodes.
 		nodes, err := framework.GetReadyNodes(f)
 		framework.ExpectNoError(err)
 
@@ -108,93 +88,52 @@ func networkPolicyTest(f *framework.Framework, localNamespace *api.Namespace, re
 			"Rerun it with at least two nodes to get complete coverage.")
 		}
 
-		podNames := launchNetTestPods(f, localNamespace, remoteNamespace, nodes, "1.8")
+		// Create a "local" service and a "remote" service.  These are really just used
+		// for pod discovery by the nettest containers.
+		localService := createService(f, localNamespace, localServiceName)
+		remoteService := createService(f, remoteNamespace, remoteServiceName)
 
-		// Clean up the pods
+		// Clean up services
+		defer func() {
+			By("Cleaning up the local service")
+			if err = f.Client.Services(localNamespace.Name).Delete(localService.Name); err != nil {
+				framework.Failf("unable to delete svc %v: %v", localService.Name, err)
+			}
+		}()
+		defer func() {
+			By("Cleaning up the remote service")
+			if err = f.Client.Services(remoteNamespace.Name).Delete(remoteService.Name); err != nil {
+				framework.Failf("unable to delete svc %v: %v", remoteService.Name, err)
+			}
+		}()
+
+		By("Creating a webserver (pending) pod on each node")
+
+		localPodName, remotePodNames := launchNetTestPods(f, localNamespace, remoteNamespace, nodes, "1.8")
+
+		// Deferred clean up of the pods.
 		defer func() {
 			By("Cleaning up the webserver pods")
-			for _, podName := range podNames {
-				if err = f.Client.Pods(f.Namespace.Name).Delete(podName, nil); err != nil {
+			if err = f.Client.Pods(localNamespace.Name).Delete(localPodName, nil); err != nil {
+				framework.Logf("Failed to delete pod %s: %v", localPodName, err)
+			}
+			for _, podName := range remotePodNames {
+				if err = f.Client.Pods(remoteNamespace.Name).Delete(podName, nil); err != nil {
 					framework.Logf("Failed to delete pod %s: %v", podName, err)
 				}
 			}
 		}()
 
-		By("Waiting for the webserver pods to transition to Running state")
-		for _, podName := range podNames {
-			err = f.WaitForPodRunning(podName)
+		// Wait for all pods to be running.
+		By(fmt.Sprintf("Waiting for pod %q to be running", localPodName))
+		err = framework.WaitForPodRunningInNamespace(f.Client, localPodName, localNamespace.Name)
+		Expect(err).NotTo(HaveOccurred())
+		for _, podName := range remotePodNames {
+			By(fmt.Sprintf("Waiting for pod %q to be running", podName))
+			err = framework.WaitForPodRunningInNamespace(f.Client, podName, remoteNamespace.Name)
 			Expect(err).NotTo(HaveOccurred())
 		}
-
-		By("Waiting for connectivity to be verified")
-		passed := false
-
-		//once response OK, evaluate response body for pass/fail.
-		var body []byte
-		getDetails := func() ([]byte, error) {
-			proxyRequest, errProxy := framework.GetServicesProxyRequest(f.Client, f.Client.Get())
-			if errProxy != nil {
-				return nil, errProxy
-			}
-			return proxyRequest.Namespace(f.Namespace.Name).
-			Name(svc.Name).
-			Suffix("read").
-			DoRaw()
-		}
-
-		getStatus := func() ([]byte, error) {
-			proxyRequest, errProxy := framework.GetServicesProxyRequest(f.Client, f.Client.Get())
-			if errProxy != nil {
-				return nil, errProxy
-			}
-			return proxyRequest.Namespace(f.Namespace.Name).
-			Name(svc.Name).
-			Suffix("status").
-			DoRaw()
-		}
-
-		// nettest containers will wait for all service endpoints to come up for 2 minutes
-		// apply a 3 minutes observation period here to avoid this test to time out before the nettest starts to contact peers
-		timeout := time.Now().Add(3 * time.Minute)
-		for i := 0; !passed && timeout.After(time.Now()); i++ {
-			time.Sleep(2 * time.Second)
-			framework.Logf("About to make a proxy status call")
-			start := time.Now()
-			body, err = getStatus()
-			framework.Logf("Proxy status call returned in %v", time.Since(start))
-			if err != nil {
-				framework.Logf("Attempt %v: service/pod still starting. (error: '%v')", i, err)
-				continue
-			}
-			// Finally, we pass/fail the test based on if the container's response body, as to whether or not it was able to find peers.
-			switch {
-			case string(body) == "pass":
-				framework.Logf("Passed on attempt %v. Cleaning up.", i)
-				passed = true
-			case string(body) == "running":
-				framework.Logf("Attempt %v: test still running", i)
-			case string(body) == "fail":
-				if body, err = getDetails(); err != nil {
-					framework.Failf("Failed on attempt %v. Cleaning up. Error reading details: %v", i, err)
-				} else {
-					framework.Failf("Failed on attempt %v. Cleaning up. Details:\n%s", i, string(body))
-				}
-			case strings.Contains(string(body), "no endpoints available"):
-				framework.Logf("Attempt %v: waiting on service/endpoints", i)
-			default:
-				framework.Logf("Unexpected response:\n%s", body)
-			}
-		}
-
-		if !passed {
-			if body, err = getDetails(); err != nil {
-				framework.Failf("Timed out. Cleaning up. Error reading details: %v", err)
-			} else {
-				framework.Failf("Timed out. Cleaning up. Details:\n%s", string(body))
-			}
-		}
-		Expect(string(body)).To(Equal("pass"))
-	})
+	}
 }
 
 // Launch the nettest pods.  This launches:
@@ -202,8 +141,8 @@ func networkPolicyTest(f *framework.Framework, localNamespace *api.Namespace, re
 //    peers
 // -  A single remote service pod on all nodes that each find the local service
 //    pod peer
-func launchNetTestPods(f *framework.Framework, localNamespace *api.Namespace, remoteNamespace *api.Namespace, nodes *api.NodeList, version string) []string {
-	podNames := []string{}
+func launchNetTestPods(f *framework.Framework, localNamespace *api.Namespace, remoteNamespace *api.Namespace, nodes *api.NodeList, version string) (string, []string) {
+	remotePodNames := []string{}
 
 	totalRemotePods := len(nodes.Items)
 
@@ -212,16 +151,16 @@ func launchNetTestPods(f *framework.Framework, localNamespace *api.Namespace, re
 	// Create the local pod on the first node.  It will find all of the remote
 	// pods (one for each node).
 	pod = createPod(f, localNamespace, remoteNamespace, localServiceName, remoteServiceName, totalRemotePods, nodes.Items[0], version)
-	podNames = append(podNames, pod.ObjectMeta.Name)
+	localPodName := pod.ObjectMeta.Name
 
 	// Now create the remote pods, one on each node - each should just search
 	// for the single local pod peer.
 	for _, node := range nodes.Items {
 		pod = createPod(f, remoteNamespace, localNamespace, remoteServiceName, localServiceName, 1, node, version)
-		podNames = append(podNames, pod.ObjectMeta.Name)
+		remotePodNames = append(podNames, pod.ObjectMeta.Name)
 	}
 
-	return podNames
+	return localPodName, remotePodNames
 }
 
 func createPod(f *framework.Framework,
