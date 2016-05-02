@@ -133,7 +133,7 @@ func networkPolicyTest(f *framework.Framework, localNamespace *api.Namespace, re
 			err = framework.WaitForPodRunningInNamespace(f.Client, podName, remoteNamespace.Name)
 			Expect(err).NotTo(HaveOccurred())
 		}
-	}
+	})
 }
 
 // Launch the nettest pods.  This launches:
