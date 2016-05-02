@@ -329,7 +329,6 @@ func testConnectivity(f *framework.Framework, namespace *api.Namespace, serviceN
 }
 
 func setNetworkIsolationAnnotations(f *framework.Framework, namespace *api.Namespace, enableIsolation bool) {
-
 	var annotations = map[string]string{}
 	if enableIsolation {
 		By("Enabling isolation through namespace annotations")
@@ -339,8 +338,13 @@ func setNetworkIsolationAnnotations(f *framework.Framework, namespace *api.Names
 		annotations["net.alpha.kubernetes.io/network-isolation"] = "no"
 	}
 
-	// Update the namespace
+	// Update the namespace.  We set the resource version to be an empty
+	// string, this forces the update.  If we weren't to do this, we would
+	// either need to requery the namespace, or update our local namespace
+	// references with the one returned by the update.  This approach
+	// requires less plumbing.
 	namespace.ObjectMeta.Annotations = annotations
+	namespace.ObjectMeta.ResourceVersion = ""
 	_, err := f.Client.Namespaces().Update(namespace)
 	Expect(err).NotTo(HaveOccurred())
 }
