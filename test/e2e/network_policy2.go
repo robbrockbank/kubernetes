@@ -38,14 +38,6 @@ var remoteServiceName = "network-policy-remote"
 var _ = framework.KubeDescribe("NetworkPolicy", func() {
 	f := framework.NewDefaultFramework("network-policy")
 
-	// These tests use two namespaces.  A single namespace is created by
-	// default.  Create another and store both separately for clarity.
-	ns1 := f.Namespace
-	ns2, err := f.CreateNamespace(f.BaseName + "2", map[string]string{
-		"e2e-framework": f.BaseName + "2",
-	})
-	Expect(err).NotTo(HaveOccurred())
-
 	BeforeEach(func() {
 		//Assert basic external connectivity.
 		//Since this is not really a test of kubernetes in any way, we
@@ -65,78 +57,90 @@ var _ = framework.KubeDescribe("NetworkPolicy", func() {
 		framework.ExpectNoError(framework.CheckConnectivityToHost(f, "", "wget-test", "google.com", 30))
 	})
 
-	networkPolicyTest(f, ns1, ns2)
+	It("should isolate containers when NetworkIsolation is enabled [Policy]", func() {
+		runTests(f)
+	})
 })
 
-
-func networkPolicyTest(f *framework.Framework, localNamespace *api.Namespace, remoteNamespace *api.Namespace) {
-	// Now we can proceed with the test.
-	It("should function for intra-pod communication [Conformance]", func() {
-
-		// Get the available nodes.
-		nodes, err := framework.GetReadyNodes(f)
-		framework.ExpectNoError(err)
-
-		if len(nodes.Items) == 1 {
-			// in general, the test requires two nodes. But for local development, often a one node cluster
-			// is created, for simplicity and speed. (see issue #10012). We permit one-node test
-			// only in some cases
-			if !framework.ProviderIs("local") {
-				framework.Failf(fmt.Sprintf("The test requires two Ready nodes on %s, but found just one.", framework.TestContext.Provider))
-			}
-			framework.Logf("Only one ready node is detected. The test has limited scope in such setting. " +
-			"Rerun it with at least two nodes to get complete coverage.")
-		}
-
-		// Create a "local" service and a "remote" service.  These are really just used
-		// for pod discovery by the nettest containers.
-		localService := createService(f, localNamespace, localServiceName)
-		remoteService := createService(f, remoteNamespace, remoteServiceName)
-
-		// Clean up services
-		defer func() {
-			By("Cleaning up the local service")
-			if err = f.Client.Services(localNamespace.Name).Delete(localService.Name); err != nil {
-				framework.Failf("unable to delete svc %v: %v", localService.Name, err)
-			}
-		}()
-		defer func() {
-			By("Cleaning up the remote service")
-			if err = f.Client.Services(remoteNamespace.Name).Delete(remoteService.Name); err != nil {
-				framework.Failf("unable to delete svc %v: %v", remoteService.Name, err)
-			}
-		}()
-
-		By("Creating a webserver (pending) pod on each node")
-
-		localPodName, remotePodNames := launchNetTestPods(f, localNamespace, remoteNamespace, nodes, "1.8")
-
-		// Deferred clean up of the pods.
-		defer func() {
-			By("Cleaning up the webserver pods")
-			if err = f.Client.Pods(localNamespace.Name).Delete(localPodName, nil); err != nil {
-				framework.Logf("Failed to delete pod %s: %v", localPodName, err)
-			}
-			for _, podName := range remotePodNames {
-				if err = f.Client.Pods(remoteNamespace.Name).Delete(podName, nil); err != nil {
-					framework.Logf("Failed to delete pod %s: %v", podName, err)
-				}
-			}
-		}()
-
-		// Wait for all pods to be running.
-		By(fmt.Sprintf("Waiting for pod %q to be running", localPodName))
-		err = framework.WaitForPodRunningInNamespace(f.Client, localPodName, localNamespace.Name)
-		Expect(err).NotTo(HaveOccurred())
-		for _, podName := range remotePodNames {
-			By(fmt.Sprintf("Waiting for pod %q to be running", podName))
-			err = framework.WaitForPodRunningInNamespace(f.Client, podName, remoteNamespace.Name)
-			Expect(err).NotTo(HaveOccurred())
-		}
-
-		testConnectivity(f, localNamespace, localService.Name)
-		testConnectivity(f, remoteNamespace, remoteService.Name)
+func runTests(f *framework.Framework) {
+	// These tests use two namespaces.  A single namespace is created by
+	// default.  Create another and store both separately for clarity.
+	ns1 := f.Namespace
+	ns2, err := f.CreateNamespace(f.BaseName + "2", map[string]string{
+		"e2e-framework": f.BaseName + "2",
 	})
+	Expect(err).NotTo(HaveOccurred())
+
+	// Get the available nodes.
+	nodes, err := framework.GetReadyNodes(f)
+	framework.ExpectNoError(err)
+
+	if len(nodes.Items) == 1 {
+		// in general, the test requires two nodes. But for local development, often a one node cluster
+		// is created, for simplicity and speed. (see issue #10012). We permit one-node test
+		// only in some cases
+		if !framework.ProviderIs("local") {
+			framework.Failf(fmt.Sprintf("The test requires two Ready nodes on %s, but found just one.", framework.TestContext.Provider))
+		}
+		framework.Logf("Only one ready node is detected. The test has limited scope in such setting. " +
+		"Rerun it with at least two nodes to get complete coverage.")
+	}
+
+	networkPolicyTest(f, ns1, ns2, nodes)
+}
+
+
+func networkPolicyTest(f *framework.Framework, localNamespace *api.Namespace, remoteNamespace *api.Namespace, nodes *api.NodeList) {
+	var err error
+
+	// Create a "local" service and a "remote" service.  These are really just used
+	// for pod discovery by the nettest containers.
+	localService := createService(f, localNamespace, localServiceName)
+	remoteService := createService(f, remoteNamespace, remoteServiceName)
+
+	// Clean up services
+	defer func() {
+		By("Cleaning up the local service")
+		if err = f.Client.Services(localNamespace.Name).Delete(localService.Name); err != nil {
+			framework.Failf("unable to delete svc %v: %v", localService.Name, err)
+		}
+	}()
+	defer func() {
+		By("Cleaning up the remote service")
+		if err = f.Client.Services(remoteNamespace.Name).Delete(remoteService.Name); err != nil {
+			framework.Failf("unable to delete svc %v: %v", remoteService.Name, err)
+		}
+	}()
+
+	By("Creating a webserver (pending) pod on each node")
+
+	localPodName, remotePodNames := launchNetTestPods(f, localNamespace, remoteNamespace, nodes, "1.8")
+
+	// Deferred clean up of the pods.
+	defer func() {
+		By("Cleaning up the webserver pods")
+		if err = f.Client.Pods(localNamespace.Name).Delete(localPodName, nil); err != nil {
+			framework.Logf("Failed to delete pod %s: %v", localPodName, err)
+		}
+		for _, podName := range remotePodNames {
+			if err = f.Client.Pods(remoteNamespace.Name).Delete(podName, nil); err != nil {
+				framework.Logf("Failed to delete pod %s: %v", podName, err)
+			}
+		}
+	}()
+
+	// Wait for all pods to be running.
+	By(fmt.Sprintf("Waiting for pod %q to be running", localPodName))
+	err = framework.WaitForPodRunningInNamespace(f.Client, localPodName, localNamespace.Name)
+	Expect(err).NotTo(HaveOccurred())
+	for _, podName := range remotePodNames {
+		By(fmt.Sprintf("Waiting for pod %q to be running", podName))
+		err = framework.WaitForPodRunningInNamespace(f.Client, podName, remoteNamespace.Name)
+		Expect(err).NotTo(HaveOccurred())
+	}
+
+	testConnectivity(f, localNamespace, localService.Name)
+	testConnectivity(f, remoteNamespace, remoteService.Name)
 }
 
 // Launch the nettest pods.  This launches:
