@@ -153,14 +153,13 @@ func launchNetTestPods(f *framework.Framework, localNamespace *api.Namespace, re
 
 	// Create the local pod on the first node.  It will find all of the remote
 	// pods (one for each node).
-	pod := createPod(f, localNamespace, remoteNamespace, localServiceName, remoteServiceName, totalRemotePods, &nodes.Items[0], version)
-	localPodName := pod.ObjectMeta.Name
+	localPodName := createPod(f, localNamespace, remoteNamespace, localServiceName, remoteServiceName, totalRemotePods, &nodes.Items[0], version)
 
 	// Now create the remote pods, one on each node - each should just search
 	// for the single local pod peer.
 	for _, node := range nodes.Items {
-		pod = createPod(f, remoteNamespace, localNamespace, remoteServiceName, localServiceName, 1, &node, version)
-		remotePodNames = append(remotePodNames, pod.ObjectMeta.Name)
+		podName := createPod(f, remoteNamespace, localNamespace, remoteServiceName, localServiceName, 1, &node, version)
+		remotePodNames = append(remotePodNames, podName)
 	}
 
 	return localPodName, remotePodNames
@@ -199,12 +198,12 @@ numPeers int, node *api.Node, version string) string {
 	Expect(err).NotTo(HaveOccurred())
 	framework.Logf("Created pod %s on node %s", pod.ObjectMeta.Name, node.Name)
 
-	return pod
+	return pod.ObjectMeta.Name
 }
 
 func createService(f *framework.Framework, namespace *api.Namespace, name string) (*api.Service) {
 	By(fmt.Sprintf("Creating a service named %q in namespace %q", name, namespace.Name))
-	svc, err := f.Client.Services(local_ns.Name).Create(&api.Service{
+	svc, err := f.Client.Services(namespace.Name).Create(&api.Service{
 		ObjectMeta: api.ObjectMeta{
 			Name: name,
 			Labels: map[string]string{
@@ -229,7 +228,11 @@ func createService(f *framework.Framework, namespace *api.Namespace, name string
 }
 
 func testConnectivity(f *framework.Framework, namespace *api.Namespace, serviceName string) {
+	By("Waiting for connectivity to be verified")
+	passed := false
+
 	//once response OK, evaluate response body for pass/fail.
+	var err error
 	var body []byte
 	getDetails := func() ([]byte, error) {
 		proxyRequest, errProxy := framework.GetServicesProxyRequest(f.Client, f.Client.Get())
