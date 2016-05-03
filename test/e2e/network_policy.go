@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"time"
 
@@ -378,7 +377,7 @@ func setGlobalNetworkPolicy(f *framework.Framework, namespace *api.Namespace) {
 	url := fmt.Sprintf("/apis/net.alpha.kubernetes.io/v1alpha1/namespaces/%v/networkpolicys", namespace.Name)
 
 	response, err := f.Client.Post().
-		AbsPath(url)
+		AbsPath(url).
 		SetHeader("Content-Type", postConfigBodyWriter.FormDataContentType()).
 		Body(bytes.NewReader([]byte(body))).
 		Do().Raw()
