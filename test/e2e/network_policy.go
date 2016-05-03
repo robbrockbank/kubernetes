@@ -17,6 +17,7 @@ limitations under the License.
 package e2e
 
 import (
+	"bytes"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -91,8 +92,8 @@ func runTests(f *framework.Framework) {
 	Expect(err).NotTo(HaveOccurred())
 
 	// Add policy to
-	setGlobalNetworkPolicy(ns1)
-	setGlobalNetworkPolicy(ns2)
+	setGlobalNetworkPolicy(f, ns1)
+	setGlobalNetworkPolicy(f, ns2)
 
 	// Get the available nodes.
 	nodes, err := framework.GetReadyNodes(f)
@@ -354,7 +355,7 @@ func setNetworkIsolationAnnotations(f *framework.Framework, namespace *api.Names
 	Expect(err).NotTo(HaveOccurred())
 }
 
-func setGlobalNetworkPolicy(namespace *api.Namespace) {
+func setGlobalNetworkPolicy(f *framework.Framework, namespace *api.Namespace) {
 	body := `{
   "kind": "NetworkPolicy",
   "metadata": {
@@ -375,7 +376,13 @@ func setGlobalNetworkPolicy(namespace *api.Namespace) {
   }
 }`
 	url := fmt.Sprintf("/apis/net.alpha.kubernetes.io/v1alpha1/namespaces/%v/networkpolicys", namespace.Name)
-	response, err := http.NewRequest("POST", url, bytes.NewReader([]byte(body)))
+
+	response, err := f.Client.Post().
+		AbsPath(url)
+		SetHeader("Content-Type", postConfigBodyWriter.FormDataContentType()).
+		Body(bytes.NewReader([]byte(body))).
+		Do().Raw()
+
 	if err != nil {
 		framework.Logf("unexpected error: %v", err)
 	}
