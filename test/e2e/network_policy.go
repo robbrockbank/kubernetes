@@ -19,6 +19,7 @@ package e2e
 import (
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"time"
 
@@ -31,14 +32,14 @@ import (
 )
 
 /*
-These Network Policy tests create two services "local" and "remote".
-There is a single pod in the local service, and a single pod on each node in
-the remote service.
+These Network Policy tests create two services A and B.
+There is a single pod in the service A , and a single pod on each node in
+the service B.
 
 Each pod is running nettest container:
--  The local pod uses service discovery to locate the remote pods and waits
+-  The A pod uses service discovery to locate the B pods and waits
    to establish communication (if expected) with those pods.
--  Each remote pod uses service discovery to locate the local pod and waits to
+-  Each B pod uses service discovery to locate the A pod and waits to
    establish communication (if expected) with that pod.
 
 We run a number of permutations of the following:
@@ -50,8 +51,8 @@ We run a number of permutations of the following:
  */
 
 // Define the names of the two services
-var localServiceName = "network-policy-local"
-var remoteServiceName = "network-policy-remote"
+var serviceAName = "network-policy-A"
+var serviceBName = "network-policy-B"
 
 var _ = framework.KubeDescribe("NetworkPolicy", func() {
 	f := framework.NewDefaultFramework("network-policy")
@@ -89,6 +90,10 @@ func runTests(f *framework.Framework) {
 	})
 	Expect(err).NotTo(HaveOccurred())
 
+	// Add policy to
+	setGlobalNetworkPolicy(ns1)
+	setGlobalNetworkPolicy(ns2)
+
 	// Get the available nodes.
 	nodes, err := framework.GetReadyNodes(f)
 	framework.ExpectNoError(err)
@@ -111,65 +116,65 @@ func runTests(f *framework.Framework) {
 	// Enable isolation.  We expect isolation between different namespaces,
 	// but not within a namespace.
 	networkPolicyTest(f, ns1, ns1, nodes, true, false, false)
-	networkPolicyTest(f, ns1, ns2, nodes, true, false, true)
+	//networkPolicyTest(f, ns1, ns2, nodes, true, false, true)
 }
 
 
-func networkPolicyTest(f *framework.Framework, localNamespace *api.Namespace, remoteNamespace *api.Namespace, nodes *api.NodeList,
+func networkPolicyTest(f *framework.Framework, namespaceA *api.Namespace, namespaceB *api.Namespace, nodes *api.NodeList,
 			enableIsolation bool, installRules bool, expectIsolation bool) {
 	var err error
 
-	setNetworkIsolationAnnotations(f, localNamespace, enableIsolation)
-	setNetworkIsolationAnnotations(f, remoteNamespace, enableIsolation)
+	setNetworkIsolationAnnotations(f, namespaceA, enableIsolation)
+	setNetworkIsolationAnnotations(f, namespaceB, enableIsolation)
 
-	// Create a "local" service and a "remote" service.  These are really just used
+	// Create service A and B.  These are really just used
 	// for pod discovery by the nettest containers.
-	localService := createService(f, localNamespace, localServiceName)
-	remoteService := createService(f, remoteNamespace, remoteServiceName)
+	serviceA := createService(f, namespaceA, serviceAName)
+	serviceB := createService(f, namespaceB, serviceBName)
 
 	// Clean up services
 	defer func() {
-		By("Cleaning up the local service")
-		if err = f.Client.Services(localNamespace.Name).Delete(localService.Name); err != nil {
-			framework.Failf("unable to delete svc %v: %v", localService.Name, err)
+		By("Cleaning up the service A")
+		if err = f.Client.Services(namespaceA.Name).Delete(serviceA.Name); err != nil {
+			framework.Failf("unable to delete svc %v: %v", serviceA.Name, err)
 		}
 	}()
 	defer func() {
-		By("Cleaning up the remote service")
-		if err = f.Client.Services(remoteNamespace.Name).Delete(remoteService.Name); err != nil {
-			framework.Failf("unable to delete svc %v: %v", remoteService.Name, err)
+		By("Cleaning up the service B")
+		if err = f.Client.Services(namespaceB.Name).Delete(serviceB.Name); err != nil {
+			framework.Failf("unable to delete svc %v: %v", serviceB.Name, err)
 		}
 	}()
 
 	By("Creating a webserver (pending) pod on each node")
 
-	localPodName, remotePodNames := launchNetTestPods(f, localNamespace, remoteNamespace, nodes, "1.8")
+	podAName, podBNames := launchNetTestPods(f, namespaceA, namespaceB, nodes, "1.8")
 
 	// Deferred clean up of the pods.
 	defer func() {
 		By("Cleaning up the webserver pods")
-		if err = f.Client.Pods(localNamespace.Name).Delete(localPodName, nil); err != nil {
-			framework.Logf("Failed to delete pod %s: %v", localPodName, err)
+		if err = f.Client.Pods(namespaceA.Name).Delete(podAName, nil); err != nil {
+			framework.Logf("Failed to delete pod %s: %v", podAName, err)
 		}
-		for _, podName := range remotePodNames {
-			if err = f.Client.Pods(remoteNamespace.Name).Delete(podName, nil); err != nil {
+		for _, podName := range podBNames {
+			if err = f.Client.Pods(namespaceB.Name).Delete(podName, nil); err != nil {
 				framework.Logf("Failed to delete pod %s: %v", podName, err)
 			}
 		}
 	}()
 
 	// Wait for all pods to be running.
-	By(fmt.Sprintf("Waiting for pod %q to be running", localPodName))
-	err = framework.WaitForPodRunningInNamespace(f.Client, localPodName, localNamespace.Name)
+	By(fmt.Sprintf("Waiting for pod %q to be running", podAName))
+	err = framework.WaitForPodRunningInNamespace(f.Client, podAName, namespaceA.Name)
 	Expect(err).NotTo(HaveOccurred())
-	for _, podName := range remotePodNames {
+	for _, podName := range podBNames {
 		By(fmt.Sprintf("Waiting for pod %q to be running", podName))
-		err = framework.WaitForPodRunningInNamespace(f.Client, podName, remoteNamespace.Name)
+		err = framework.WaitForPodRunningInNamespace(f.Client, podName, namespaceB.Name)
 		Expect(err).NotTo(HaveOccurred())
 	}
 
-	testConnectivity(f, localNamespace, localService.Name)
-	testConnectivity(f, remoteNamespace, remoteService.Name)
+	testConnectivity(f, namespaceA, serviceA.Name)
+	testConnectivity(f, namespaceB, serviceB.Name)
 }
 
 func createService(f *framework.Framework, namespace *api.Namespace, name string) (*api.Service) {
@@ -198,36 +203,36 @@ func createService(f *framework.Framework, namespace *api.Namespace, name string
 	return svc
 }
 
-func launchNetTestPods(f *framework.Framework, localNamespace *api.Namespace, remoteNamespace *api.Namespace, nodes *api.NodeList, version string) (string, []string) {
-	remotePodNames := []string{}
+func launchNetTestPods(f *framework.Framework, namespaceA *api.Namespace, namespaceB *api.Namespace, nodes *api.NodeList, version string) (string, []string) {
+	podBNames := []string{}
 
 	totalRemotePods := len(nodes.Items)
 
 	Expect(totalRemotePods).NotTo(Equal(0))
 
-	// Create the local pod on the first node.  It will find all of the remote
+	// Create the A pod on the first node.  It will find all of the B
 	// pods (one for each node).
-	localPodName := createPod(f, localNamespace, remoteNamespace, localServiceName, remoteServiceName, totalRemotePods, &nodes.Items[0], version)
+	podAName := createPod(f, namespaceA, namespaceB, serviceAName, serviceBName, totalRemotePods, &nodes.Items[0], version)
 
-	// Now create the remote pods, one on each node - each should just search
-	// for the single local pod peer.
+	// Now create the B pods, one on each node - each should just search
+	// for the single A pod peer.
 	for _, node := range nodes.Items {
-		podName := createPod(f, remoteNamespace, localNamespace, remoteServiceName, localServiceName, 1, &node, version)
-		remotePodNames = append(remotePodNames, podName)
+		podName := createPod(f, namespaceB, namespaceA, serviceBName, serviceAName, 1, &node, version)
+		podBNames = append(podBNames, podName)
 	}
 
-	return localPodName, remotePodNames
+	return podAName, podBNames
 }
 
 func createPod(f *framework.Framework,
-		podNamespace *api.Namespace, peerNamespace *api.Namespace,
-		podServiceName string, peerServiceName string,
+		namespace *api.Namespace, peerNamespace *api.Namespace,
+		serviceName string, peerServiceName string,
 		numPeers int, node *api.Node, version string) string {
-	pod, err := f.Client.Pods(podNamespace.Name).Create(&api.Pod{
+	pod, err := f.Client.Pods(namespace.Name).Create(&api.Pod{
 		ObjectMeta: api.ObjectMeta{
-			GenerateName: podServiceName + "-",
+			GenerateName: serviceName + "-",
 			Labels: map[string]string{
-				"name": podServiceName,
+				"name": serviceName,
 			},
 		},
 		Spec: api.PodSpec{
@@ -239,7 +244,7 @@ func createPod(f *framework.Framework,
 						"-service=" + peerServiceName,
 						// peers >= totalRemotePods should be asserted by the container.
 						// the nettest container finds peers by looking up list of svc endpoints.
-						// The local pod searches for the remote pods.
+						// The A pod searches for the B pods.
 						fmt.Sprintf("-peers=%d", numPeers),
 						"-namespace=" + peerNamespace.Name},
 					Ports: []api.ContainerPort{{ContainerPort: 8080}},
@@ -340,11 +345,41 @@ func setNetworkIsolationAnnotations(f *framework.Framework, namespace *api.Names
 
 	// Update the namespace.  We set the resource version to be an empty
 	// string, this forces the update.  If we weren't to do this, we would
-	// either need to requery the namespace, or update our local namespace
+	// either need to re-query the namespace, or update the namespace
 	// references with the one returned by the update.  This approach
 	// requires less plumbing.
 	namespace.ObjectMeta.Annotations = annotations
 	namespace.ObjectMeta.ResourceVersion = ""
 	_, err := f.Client.Namespaces().Update(namespace)
 	Expect(err).NotTo(HaveOccurred())
+}
+
+func setGlobalNetworkPolicy(namespace *api.Namespace) {
+	body := `{
+  "kind": "NetworkPolicy",
+  "metadata": {
+    "name": "Proxy",
+    "namespace": "` + namespace.Name + `"
+  },
+  "spec": {
+    "podSelector": {}
+    "ingress": [
+      {
+        "ports": [
+          {
+            "port": 8080
+          }
+        ]
+      }
+    ]
+  }
+}`
+	url := fmt.Sprintf("/apis/net.alpha.kubernetes.io/v1alpha1/namespaces/%v/networkpolicys", namespace.Name)
+	response, err := http.NewRequest("POST", url, bytes.NewReader([]byte(body)))
+	if err != nil {
+		framework.Logf("unexpected error: %v", err)
+	}
+	if response.StatusCode != http.StatusBadRequest {
+		framework.Logf("Unexpected response %#v", response)
+	}
 }
