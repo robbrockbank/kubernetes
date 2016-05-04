@@ -117,7 +117,7 @@ func runTests(f *framework.Framework) {
 	// but not within a namespace.
 	networkPolicyTest(f, ns1, ns1, nodes, true, false, false)
 	//networkPolicyTest(f, ns1, ns2, nodes, true, false, true)
-	
+
 	time.Sleep(time.Minute * 10)
 }
 
@@ -366,6 +366,7 @@ func setProxyNetworkPolicy(f *framework.Framework, namespace *api.Namespace) {
     "namespace": "` + namespace.Name + `"
   },
   "spec": {
+    "podSelector": null,
     "ingress": [
       {
         "ports": [
