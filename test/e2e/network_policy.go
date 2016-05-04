@@ -116,9 +116,7 @@ func runTests(f *framework.Framework) {
 	// Enable isolation.  We expect isolation between different namespaces,
 	// but not within a namespace.
 	networkPolicyTest(f, ns1, ns1, nodes, true, false, false)
-	//networkPolicyTest(f, ns1, ns2, nodes, true, false, true)
-
-	time.Sleep(time.Minute * 10)
+	networkPolicyTest(f, ns1, ns2, nodes, true, false, true)
 }
 
 
