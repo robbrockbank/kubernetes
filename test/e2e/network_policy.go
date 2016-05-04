@@ -360,7 +360,7 @@ func setGlobalNetworkPolicy(f *framework.Framework, namespace *api.Namespace) {
 	body := `{
   "kind": "NetworkPolicy",
   "metadata": {
-    "name": "Proxy",
+    "name": "proxy",
     "namespace": "` + namespace.Name + `"
   },
   "spec": {
@@ -377,7 +377,7 @@ func setGlobalNetworkPolicy(f *framework.Framework, namespace *api.Namespace) {
 }`
 	url := fmt.Sprintf("/apis/net.alpha.kubernetes.io/v1alpha1/namespaces/%v/networkpolicys", namespace.Name)
 
-	_, err := f.Client.Post().
+	response, err := f.Client.Post().
 		AbsPath(url).
 		SetHeader("Content-Type", "application/json").
 		Body(bytes.NewReader([]byte(body))).
@@ -385,4 +385,5 @@ func setGlobalNetworkPolicy(f *framework.Framework, namespace *api.Namespace) {
 	if err != nil {
 		framework.Logf("unexpected error: %v", err)
 	}
+	framework.Logf("Response %s", response.body)
 }
