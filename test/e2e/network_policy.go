@@ -90,7 +90,7 @@ func runTests(f *framework.Framework) {
 	})
 	Expect(err).NotTo(HaveOccurred())
 
-	// Add policy to
+	// Add policy to both namespaces to accept proxy request traffic.
 	setGlobalNetworkPolicy(f, ns1)
 	setGlobalNetworkPolicy(f, ns2)
 
@@ -355,6 +355,8 @@ func setNetworkIsolationAnnotations(f *framework.Framework, namespace *api.Names
 }
 
 func setGlobalNetworkPolicy(f *framework.Framework, namespace *api.Namespace) {
+	By(fmt.Sprintf("Setting network policy to allow proxy traffic for namespace %v", namespace.Name))
+
 	body := `{
   "kind": "NetworkPolicy",
   "metadata": {
@@ -362,7 +364,6 @@ func setGlobalNetworkPolicy(f *framework.Framework, namespace *api.Namespace) {
     "namespace": "` + namespace.Name + `"
   },
   "spec": {
-    "podSelector": {},
     "ingress": [
       {
         "ports": [
