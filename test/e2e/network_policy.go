@@ -51,8 +51,8 @@ We run a number of permutations of the following:
  */
 
 // Define the names of the two services
-var serviceAName = "network-policy-A"
-var serviceBName = "network-policy-B"
+var serviceAName = "network-policy-a"
+var serviceBName = "network-policy-b"
 
 var _ = framework.KubeDescribe("NetworkPolicy", func() {
 	f := framework.NewDefaultFramework("network-policy")
@@ -85,8 +85,8 @@ func runTests(f *framework.Framework) {
 	// These tests use two namespaces.  A single namespace is created by
 	// default.  Create another and store both separately for clarity.
 	ns1 := f.Namespace
-	ns2, err := f.CreateNamespace(f.BaseName + "2", map[string]string{
-		"e2e-framework": f.BaseName + "2",
+	ns2, err := f.CreateNamespace(f.BaseName + "-b", map[string]string{
+		"e2e-framework": f.BaseName + "-b",
 	})
 	Expect(err).NotTo(HaveOccurred())
 
