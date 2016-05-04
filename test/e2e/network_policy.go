@@ -376,16 +376,12 @@ func setGlobalNetworkPolicy(f *framework.Framework, namespace *api.Namespace) {
 }`
 	url := fmt.Sprintf("/apis/net.alpha.kubernetes.io/v1alpha1/namespaces/%v/networkpolicys", namespace.Name)
 
-	response, err := f.Client.Post().
+	_, err := f.Client.Post().
 		AbsPath(url).
-		SetHeader("Content-Type", postConfigBodyWriter.FormDataContentType()).
+		SetHeader("Content-Type", "application/json").
 		Body(bytes.NewReader([]byte(body))).
 		Do().Raw()
-
 	if err != nil {
 		framework.Logf("unexpected error: %v", err)
-	}
-	if response.StatusCode != http.StatusBadRequest {
-		framework.Logf("Unexpected response %#v", response)
 	}
 }
