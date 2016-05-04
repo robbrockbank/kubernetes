@@ -361,6 +361,7 @@ func setProxyNetworkPolicy(f *framework.Framework, namespace *api.Namespace) {
   "kind": "NetworkPolicy",
   "metadata": {
     "name": "proxy",
+    "namespace": "` + namespace.Name + `"
   },
   "spec": {
     "podSelector": null,
