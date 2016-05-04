@@ -362,7 +362,7 @@ func setGlobalNetworkPolicy(f *framework.Framework, namespace *api.Namespace) {
     "namespace": "` + namespace.Name + `"
   },
   "spec": {
-    "podSelector": {}
+    "podSelector": {},
     "ingress": [
       {
         "ports": [
