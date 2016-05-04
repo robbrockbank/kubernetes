@@ -385,5 +385,5 @@ func setGlobalNetworkPolicy(f *framework.Framework, namespace *api.Namespace) {
 	if err != nil {
 		framework.Logf("unexpected error: %v", err)
 	}
-	framework.Logf("Response %s", response.body)
+	framework.Logf("Response: %s", response)
 }
