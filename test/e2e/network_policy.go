@@ -54,6 +54,9 @@ We run a number of permutations of the following:
 var serviceAName = "network-policy-a"
 var serviceBName = "network-policy-b"
 
+// Where to pull the
+var containerRepo = "gcr.io/google_containers"
+
 var _ = framework.KubeDescribe("NetworkPolicy", func() {
 	f := framework.NewDefaultFramework("network-policy")
 
@@ -239,7 +242,7 @@ func createPod(f *framework.Framework,
 			Containers: []api.Container{
 				{
 					Name:  "webserver",
-					Image: "gcr.io/google_containers/nettest:" + version,
+					Image: containerRepo + "/nettest:" + version,
 					Args: []string{
 						"-service=" + peerServiceName,
 						// peers >= totalRemotePods should be asserted by the container.
