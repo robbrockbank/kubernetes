@@ -28,7 +28,7 @@ limitations under the License.
 //
 // /quit       : to shut down
 // /summary    : to see a summary status of connections
-// /expiretime : to see the current message expiration time
+// /detailed   : to see the detailed internal state
 //
 // The internal facing webserver serves up the following:
 // /ping
@@ -100,7 +100,6 @@ var (
 	namespace     = flag.String("namespace", "default", "Namespace containing peer network monitor pods.")
 	service       = flag.String("service", "netmonitor", "Service containing peer network monitor pods.")
 	numPeers      = flag.Int("num-peers", 0, "Expected number of peer network monitor pods.")
-	expireTime    = flag.Int("expiration", 20, "Initial expiration time of a received message.  The expiration is increased as necessary based on the time between successive received messages from each peer.")
 	expireFactor  = flag.Int("expiration-factor", 3, "Factor to multiple time between received messages which is then used to tune the expiration time (chosen as the maximum of the current value and the factored time).")
 
 	// Our one and only state object
@@ -115,7 +114,16 @@ func (t *TCPMessage) isConnected(now int) bool {
 		return false
 	}
 
-	// Calculate the average time between messages
+	// We only consider ourselves connected when we have received at least a
+	// couple of consecutive messages so that we know what the approximate time
+	// between messages is - without that we can't determine what constitutes
+	// a fail.
+	if !len(t.TimeBetweenMessages) {
+		return false
+	}
+
+	// Calculate the average time between messages.  We multiply this by our
+	// expiration factor to determine when there is no connection.
 	timeBetweenMessages := 0
 	for i := 0; i < len(t.TimeBetweenMessages); i++ {
 		timeBetweenMessages += t.TimeBetweenMessages[i]
@@ -130,7 +138,12 @@ func (t *TCPMessage) isConnected(now int) bool {
 // serveSummary returns a JSON dictionary containing a summary of
 // counts of successful inbound and outbound peers connections.
 // e.g.
-//   {"Inbound": {"TCP": 10}, "Outbound": {"TCP": 0}}
+//   {
+//     "TCPNumInboundFailed": 4,
+//     "TCPNumInboundConnected": 10,
+//     "TCPNumOutboundFailed": 0,
+//     "TCPNumOutboundConnected": 4
+//   }
 func (s *State) serveSummary(w http.ResponseWriter, r *http.Request) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
@@ -166,8 +179,8 @@ func (s *State) serveSummary(w http.ResponseWriter, r *http.Request) {
 	s.appendErr(err)
 }
 
-// serveRead writes our json encoded state
-func (s *State) serveRead(w http.ResponseWriter, r *http.Request) {
+// serveDetailed writes our json encoded state
+func (s *State) serveDetailed(w http.ResponseWriter, r *http.Request) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 	w.WriteHeader(http.StatusOK)
@@ -177,7 +190,8 @@ func (s *State) serveRead(w http.ResponseWriter, r *http.Request) {
 	s.appendErr(err)
 }
 
-// servePing records the contact in our received state.
+// servePing responds to a ping from a peer, and records the peer contact in our
+// received state.
 func (s *State) servePing(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	s.lock.Lock()
@@ -288,7 +302,7 @@ func (s *State) monitorTCPPeer(endpoint string) {
 
 		now := time.Now()
 		stored := s.TCPOutbound[endpoint]
-		if stored.LastSuccessIndex + 1 == index {
+		if index == stored.LastSuccessIndex + 1 {
 			// This is a consecutive message so we can record the time between
 			// messages.  We use this to adjust our expiration times based
 			// on load.
@@ -297,8 +311,10 @@ func (s *State) monitorTCPPeer(endpoint string) {
 				stored.TimeBetweenMessages = stored.TimeBetweenMessages[1:]
 			}
 		}
-		stored.LastSuccessIndex = index
-		stored.LastSuccessTime = now
+		if index > stored.LastSuccessIndex {
+			stored.LastSuccessIndex = index
+			stored.LastSuccessTime = now
+		}
 	}()
 }
 
@@ -336,12 +352,17 @@ func main() {
 	http.HandleFunc("/quit", func(w http.ResponseWriter, r *http.Request) {
 		os.Exit(0)
 	})
-
 	http.HandleFunc("/summary", state.serveSummary)
 	http.HandleFunc("/detailed", state.serveDetailed)
-	http.HandleFunc("/expiretime", state.serveExpireTime)
+	http.HandleFunc("/ping", state.servePing)
 
-	go log.Fatal(http.ListenAndServe(fmt.Sprintf("0.0.0.0:%d", *port), nil))
+	// Start up the server on the required ports - by default the inter-pod communication
+	// is on a different port to the UX.  Both can be handled by the same default
+	// handler though.
+	go log.Fatal(http.ListenAndServe(fmt.Sprintf("0.0.0.0:%d", *tcpPort), nil))
+	if uiPort != tcpPort {
+		go log.Fatal(http.ListenAndServe(fmt.Sprintf("0.0.0.0:%d", *uiPort), nil))
+	}
 
 	select {}
 }
@@ -359,7 +380,7 @@ func monitorPeers(state *State) {
 		log.Printf("Server version: %#v\n", v)
 	}
 
-	// Loop until we find the correct number of peers.
+	// Loop until we at least find the correct number of endpoints.
 	for {
 		tcp_eps := getEndpoints(client)
 		if tcp_eps.Len() >= *numPeers {
