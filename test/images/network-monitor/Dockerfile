@@ -14,6 +14,6 @@
 
 FROM scratch
 MAINTAINER Rob Brockbank <rob@projectcalico.org>
-ADD webmonitor webmonitor
+ADD netmonitor netmonitor
 EXPOSE 8080
-ENTRYPOINT ["/webmonitor"]
+ENTRYPOINT ["/netmonitor"]

@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-TAG = 1.8
-PREFIX = gcr.io/google_containers
+TAG = 1.0
+#PREFIX = gcr.io/google_containers
+PREFIX = robbrockbank
 
 all: push
 
@@ -26,7 +27,8 @@ image: netmonitor
 	docker build -t $(PREFIX)/netmonitor:$(TAG) .
 
 push: image
-	gcloud docker push $(PREFIX)/netmonitor:$(TAG)
+	#gcloud docker push $(PREFIX)/netmonitor:$(TAG)
+	docker push $(PREFIX)/netmonitor:$(TAG)
 
 clean:
 	rm -f netmonitor

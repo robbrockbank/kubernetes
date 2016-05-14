@@ -18,9 +18,9 @@ package e2e
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"k8s.io/kubernetes/pkg/api"
@@ -50,12 +50,21 @@ We run a number of permutations of the following:
 -  Both services in different namespaces (so will be isolated based on policy)
  */
 
+// Summary is the data returned by /summary API on the network monitor container
+type Summary struct {
+	TCPNumOutboundConnected   int
+	TCPNumOutboundFailed      int
+	TCPNumInboundConnected    int
+	TCPNumInboundFailed       int
+}
+
 // Define the names of the two services
 var serviceAName = "network-policy-a"
 var serviceBName = "network-policy-b"
 
 // Where to pull the
-var containerRepo = "gcr.io/google_containers"
+//var container = "gcr.io/google_containers"
+var container = "robbrockbank/netmonitor:1.0"
 
 var _ = framework.KubeDescribe("NetworkPolicy", func() {
 	f := framework.NewDefaultFramework("network-policy")
@@ -74,10 +83,10 @@ var _ = framework.KubeDescribe("NetworkPolicy", func() {
 		}
 	})
 
-	It("should provide Internet connection for containers [Conformance]", func() {
-		By("Running container which tries to wget google.com")
-		framework.ExpectNoError(framework.CheckConnectivityToHost(f, "", "wget-test", "google.com", 30))
-	})
+	//It("should provide Internet connection for containers [Conformance]", func() {
+	//	By("Running container which tries to wget google.com")
+	//	framework.ExpectNoError(framework.CheckConnectivityToHost(f, "", "wget-test", "google.com", 30))
+	//})
 
 	It("should isolate containers when NetworkIsolation is enabled [Policy]", func() {
 		runTests(f)
@@ -93,9 +102,9 @@ func runTests(f *framework.Framework) {
 	})
 	Expect(err).NotTo(HaveOccurred())
 
-	// Add policy to both namespaces to accept proxy request traffic.
-	setProxyNetworkPolicy(f, ns1)
-	setProxyNetworkPolicy(f, ns2)
+	// Add policy to both namespaces to accept all traffic to the UI port.
+	addNetworkPolicyOpenPort(f, ns1, "ui", "8080", "TCP")
+	addNetworkPolicyOpenPort(f, ns2, "ui", "8080", "TCP")
 
 	// Get the available nodes.
 	nodes, err := framework.GetReadyNodes(f)
@@ -151,11 +160,12 @@ func networkPolicyTest(f *framework.Framework, namespaceA *api.Namespace, namesp
 
 	By("Creating a webserver (pending) pod on each node")
 
-	podAName, podBNames := launchNetTestPods(f, namespaceA, namespaceB, nodes, "1.8")
+	podAName, podBNames := launchNetTestPods(f, namespaceA, namespaceB, nodes)
 
 	// Deferred clean up of the pods.
 	defer func() {
 		By("Cleaning up the webserver pods")
+		waitInput()
 		if err = f.Client.Pods(namespaceA.Name).Delete(podAName, nil); err != nil {
 			framework.Logf("Failed to delete pod %s: %v", podAName, err)
 		}
@@ -176,8 +186,8 @@ func networkPolicyTest(f *framework.Framework, namespaceA *api.Namespace, namesp
 		Expect(err).NotTo(HaveOccurred())
 	}
 
-	testConnectivity(f, namespaceA, serviceA.Name)
-	testConnectivity(f, namespaceB, serviceB.Name)
+	monitorConnectivity(f, namespaceA, serviceA.Name)
+	monitorConnectivity(f, namespaceB, serviceB.Name)
 }
 
 func createService(f *framework.Framework, namespace *api.Namespace, name string) (*api.Service) {
@@ -194,6 +204,12 @@ func createService(f *framework.Framework, namespace *api.Namespace, name string
 				Protocol:   "TCP",
 				Port:       8080,
 				TargetPort: intstr.FromInt(8080),
+				Name:       "net-monitor-ui",
+			}, {
+				Protocol:   "TCP",
+				Port:       8081,
+				TargetPort: intstr.FromInt(8081),
+				Name:       "net-monitor-tcp",
 			}},
 			Selector: map[string]string{
 				"name": name,
@@ -206,7 +222,7 @@ func createService(f *framework.Framework, namespace *api.Namespace, name string
 	return svc
 }
 
-func launchNetTestPods(f *framework.Framework, namespaceA *api.Namespace, namespaceB *api.Namespace, nodes *api.NodeList, version string) (string, []string) {
+func launchNetTestPods(f *framework.Framework, namespaceA *api.Namespace, namespaceB *api.Namespace, nodes *api.NodeList) (string, []string) {
 	podBNames := []string{}
 
 	totalRemotePods := len(nodes.Items)
@@ -215,12 +231,12 @@ func launchNetTestPods(f *framework.Framework, namespaceA *api.Namespace, namesp
 
 	// Create the A pod on the first node.  It will find all of the B
 	// pods (one for each node).
-	podAName := createPod(f, namespaceA, namespaceB, serviceAName, serviceBName, totalRemotePods, &nodes.Items[0], version)
+	podAName := createPod(f, namespaceA, namespaceB, serviceAName, serviceBName, totalRemotePods, &nodes.Items[0])
 
 	// Now create the B pods, one on each node - each should just search
 	// for the single A pod peer.
 	for _, node := range nodes.Items {
-		podName := createPod(f, namespaceB, namespaceA, serviceBName, serviceAName, 1, &node, version)
+		podName := createPod(f, namespaceB, namespaceA, serviceBName, serviceAName, 1, &node)
 		podBNames = append(podBNames, podName)
 	}
 
@@ -230,7 +246,7 @@ func launchNetTestPods(f *framework.Framework, namespaceA *api.Namespace, namesp
 func createPod(f *framework.Framework,
 		namespace *api.Namespace, peerNamespace *api.Namespace,
 		serviceName string, peerServiceName string,
-		numPeers int, node *api.Node, version string) string {
+		numPeers int, node *api.Node) string {
 	pod, err := f.Client.Pods(namespace.Name).Create(&api.Pod{
 		ObjectMeta: api.ObjectMeta{
 			GenerateName: serviceName + "-",
@@ -242,15 +258,16 @@ func createPod(f *framework.Framework,
 			Containers: []api.Container{
 				{
 					Name:  "webserver",
-					Image: containerRepo + "/nettest:" + version,
+					Image: container,
 					Args: []string{
-						"-service=" + peerServiceName,
+						"--namespace=" + peerNamespace.Name,
+						"--service=" + peerServiceName,
 						// peers >= totalRemotePods should be asserted by the container.
-						// the nettest container finds peers by looking up list of svc endpoints.
+						// the netmonitor container finds peers by looking up list of svc endpoints.
 						// The A pod searches for the B pods.
-						fmt.Sprintf("-peers=%d", numPeers),
-						"-namespace=" + peerNamespace.Name},
-					Ports: []api.ContainerPort{{ContainerPort: 8080}},
+						fmt.Sprintf("--num-peers=%d", numPeers)},
+					Ports: []api.ContainerPort{{ContainerPort: 8080}, {ContainerPort: 8081}},
+					ImagePullPolicy: api.PullAlways,
 				},
 			},
 			NodeName:      node.Name,
@@ -264,7 +281,7 @@ func createPod(f *framework.Framework,
 }
 
 
-func testConnectivity(f *framework.Framework, namespace *api.Namespace, serviceName string) {
+func monitorConnectivity(f *framework.Framework, namespace *api.Namespace, serviceName string) {
 	By("Waiting for connectivity to be verified")
 	passed := false
 
@@ -277,19 +294,19 @@ func testConnectivity(f *framework.Framework, namespace *api.Namespace, serviceN
 			return nil, errProxy
 		}
 		return proxyRequest.Namespace(namespace.Name).
-			Name(serviceName).
-			Suffix("read").
+			Name(serviceName + ":net-monitor-ui").
+			Suffix("details").
 			DoRaw()
 	}
 
-	getStatus := func() ([]byte, error) {
+	getSummary := func() ([]byte, error) {
 		proxyRequest, errProxy := framework.GetServicesProxyRequest(f.Client, f.Client.Get())
 		if errProxy != nil {
 			return nil, errProxy
 		}
 		return proxyRequest.Namespace(namespace.Name).
-			Name(serviceName).
-			Suffix("status").
+			Name(serviceName + ":net-monitor-ui").
+			Suffix("summary").
 			DoRaw()
 	}
 
@@ -298,32 +315,23 @@ func testConnectivity(f *framework.Framework, namespace *api.Namespace, serviceN
 	timeout := time.Now().Add(3 * time.Minute)
 	for i := 0; !passed && timeout.After(time.Now()); i++ {
 		time.Sleep(2 * time.Second)
-		framework.Logf("About to make a proxy status call")
+		framework.Logf("About to make a proxy summary call")
 		start := time.Now()
-		body, err = getStatus()
-		framework.Logf("Proxy status call returned in %v", time.Since(start))
+		body, err = getSummary()
+		framework.Logf("Proxy summary call returned in %v", time.Since(start))
 		if err != nil {
 			framework.Logf("Attempt %v: service/pod still starting. (error: '%v')", i, err)
 			continue
 		}
-		// Finally, we pass/fail the test based on if the container's response body, as to whether or not it was able to find peers.
-		switch {
-		case string(body) == "pass":
-			framework.Logf("Passed on attempt %v. Cleaning up.", i)
-			passed = true
-		case string(body) == "running":
-			framework.Logf("Attempt %v: test still running", i)
-		case string(body) == "fail":
-			if body, err = getDetails(); err != nil {
-				framework.Failf("Failed on attempt %v. Cleaning up. Error reading details: %v", i, err)
-			} else {
-				framework.Failf("Failed on attempt %v. Cleaning up. Details:\n%s", i, string(body))
-			}
-		case strings.Contains(string(body), "no endpoints available"):
-			framework.Logf("Attempt %v: waiting on service/endpoints", i)
-		default:
-			framework.Logf("Unexpected response:\n%s", body)
+
+		var summary Summary
+		err = json.Unmarshal(body, &summary)
+		if err != nil {
+			framework.Logf("Warning: unable to unmarshal response (%v): '%v'", string(body), err)
+			return
 		}
+
+		framework.Logf("Details:\n%s", string(body))
 	}
 
 	if !passed {
@@ -357,13 +365,13 @@ func setNetworkIsolationAnnotations(f *framework.Framework, namespace *api.Names
 	Expect(err).NotTo(HaveOccurred())
 }
 
-func setProxyNetworkPolicy(f *framework.Framework, namespace *api.Namespace) {
+func addNetworkPolicyOpenPort(f *framework.Framework, namespace *api.Namespace, policy string, port string, protocol string) {
 	By(fmt.Sprintf("Setting network policy to allow proxy traffic for namespace %v", namespace.Name))
 
 	body := `{
   "kind": "NetworkPolicy",
   "metadata": {
-    "name": "proxy",
+    "name": "` + policy + `",
     "namespace": "` + namespace.Name + `"
   },
   "spec": {
@@ -372,8 +380,8 @@ func setProxyNetworkPolicy(f *framework.Framework, namespace *api.Namespace) {
       {
         "ports": [
           {
-            "protocol": "TCP",
-            "port": 8080
+            "protocol": "` + protocol + `",
+            "port": ` + port + `
           }
         ]
       }
@@ -391,4 +399,10 @@ func setProxyNetworkPolicy(f *framework.Framework, namespace *api.Namespace) {
 		framework.Logf("unexpected error: %v", err)
 	}
 	framework.Logf("Response: %s", response)
+}
+
+
+func waitInput() {
+	By("Sleeping for a bit")
+	time.Sleep(3 * time.Minute)
 }

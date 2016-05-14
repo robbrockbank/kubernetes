@@ -28,7 +28,7 @@ limitations under the License.
 //
 // /quit       : to shut down
 // /summary    : to see a summary status of connections
-// /detailed   : to see the detailed internal state
+// /details    : to see the detailed internal state
 //
 // The internal facing webserver serves up the following:
 // /ping
@@ -59,9 +59,8 @@ type TCPMessage struct {
 	// reading or writing.
 	NextIndex             int
 	LastSuccessIndex      int
-	LastSuccessTime       int
-	TimeBetweenMessages   []int
-	TimeToExpire          int
+	LastSuccessTime       *time.Time
+	TimeBetweenMessages   []time.Duration
 }
 
 // State tracks the internal connection state of all peers.
@@ -70,10 +69,8 @@ type State struct {
 	Hostname string
 
 	// The below fields require that lock is held before reading or writing.
-	TCPOutbound          map[string]*TCPMessage
-	TCPInbound           map[string]*TCPMessage
-	LastError            string
-	Logs                 []string
+	TCPOutbound          map[string]TCPMessage
+	TCPInbound           map[string]TCPMessage
 
 	lock sync.Mutex
 }
@@ -95,12 +92,14 @@ type Summary struct {
 
 var (
 	// Runtime flags
-	tcpPort       = flag.Int("tcp-port", 8081, "TCP Port number used for peer2peer testing.")
-	uiPort        = flag.Int("ui-port", 8080, "TCP Port number used for HTTP requests to query status and reset counts.")
-	namespace     = flag.String("namespace", "default", "Namespace containing peer network monitor pods.")
-	service       = flag.String("service", "netmonitor", "Service containing peer network monitor pods.")
-	numPeers      = flag.Int("num-peers", 0, "Expected number of peer network monitor pods.")
-	expireFactor  = flag.Int("expiration-factor", 3, "Factor to multiple time between received messages which is then used to tune the expiration time (chosen as the maximum of the current value and the factored time).")
+	tcpPort           = flag.Int("tcp-port", 8081, "Local TCP Port number used for peer2peer testing.")
+	uiPort            = flag.Int("ui-port", 8080, "Local TCP Port number used for HTTP requests to query status and reset counts.")
+	remoteTCPPortName = flag.String("remote-tcp-port-name", "net-monitor-tcp", "Port name used to identify the remote peer2peer TCP testing ports.")
+	namespace         = flag.String("namespace", "default", "Namespace containing peer network monitor pods.")
+	service           = flag.String("service", "netmonitor", "Service containing peer network monitor pods.")
+	numPeers          = flag.Int("num-peers", 0, "Expected number of peer network monitor pods.")
+	expireFactor      = flag.Int64("expiration-factor", 3, "Factor to multiple time between received messages which is then used to tune the expiration time (chosen as the maximum of the current value and the factored time).")
+	delayShutdown     = flag.Int("delay-shutdown", 0, "Number of seconds to delay shutdown when receiving SIGTERM.")
 
 	// Our one and only state object
 	state         State
@@ -109,8 +108,14 @@ var (
 	msgHistory    = 3
 )
 
-func (t *TCPMessage) isConnected(now int) bool {
-	if !t.TimeOfLastSuccess {
+func logErr(err error) {
+	if err != nil {
+		log.Printf("Error: %v", err)
+	}
+}
+
+func (t *TCPMessage) isConnected(now time.Time) bool {
+	if t.LastSuccessTime == nil {
 		return false
 	}
 
@@ -118,21 +123,21 @@ func (t *TCPMessage) isConnected(now int) bool {
 	// couple of consecutive messages so that we know what the approximate time
 	// between messages is - without that we can't determine what constitutes
 	// a fail.
-	if !len(t.TimeBetweenMessages) {
+	if len(t.TimeBetweenMessages) == 0 {
 		return false
 	}
 
 	// Calculate the average time between messages.  We multiply this by our
 	// expiration factor to determine when there is no connection.
-	timeBetweenMessages := 0
+	timeBetweenMessages := time.Duration(0)
 	for i := 0; i < len(t.TimeBetweenMessages); i++ {
 		timeBetweenMessages += t.TimeBetweenMessages[i]
 	}
-	timeBetweenMessages = timeBetweenMessages / len(t.TimeBetweenMessages)
+	timeBetweenMessages = timeBetweenMessages / time.Duration(len(t.TimeBetweenMessages))
 
 	// Check if the time of last success indicates that the channel is still
 	// connected.
-	return t.LastSuccessTime +  (timeBetweenMessages * expireFactor) > now
+	return now.Sub(*t.LastSuccessTime) < (timeBetweenMessages * time.Duration(*expireFactor))
 }
 
 // serveSummary returns a JSON dictionary containing a summary of
@@ -145,6 +150,7 @@ func (t *TCPMessage) isConnected(now int) bool {
 //     "TCPNumOutboundConnected": 4
 //   }
 func (s *State) serveSummary(w http.ResponseWriter, r *http.Request) {
+	log.Printf("Serving summary")
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
@@ -174,49 +180,51 @@ func (s *State) serveSummary(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	b, err := json.MarshalIndent(&summary, "", "\t")
-	s.appendErr(err)
+	logErr(err)
 	_, err = w.Write(b)
-	s.appendErr(err)
+	logErr(err)
 }
 
-// serveDetailed writes our json encoded state
-func (s *State) serveDetailed(w http.ResponseWriter, r *http.Request) {
+// serveDetails writes our json encoded state
+func (s *State) serveDetails(w http.ResponseWriter, r *http.Request) {
+	log.Printf("Serving details")
 	s.lock.Lock()
 	defer s.lock.Unlock()
 	w.WriteHeader(http.StatusOK)
 	b, err := json.MarshalIndent(s, "", "\t")
-	s.appendErr(err)
+	logErr(err)
 	_, err = w.Write(b)
-	s.appendErr(err)
+	logErr(err)
 }
 
 // servePing responds to a ping from a peer, and records the peer contact in our
 // received state.
 func (s *State) servePing(w http.ResponseWriter, r *http.Request) {
+	log.Printf("Serving ping")
 	defer r.Body.Close()
 	s.lock.Lock()
 	defer s.lock.Unlock()
 	w.WriteHeader(http.StatusOK)
 	var msg HTTPPingMessage
-	s.appendErr(json.NewDecoder(r.Body).Decode(&msg))
+	logErr(json.NewDecoder(r.Body).Decode(&msg))
 	if msg.SourceID == "" {
-		s.appendErr(fmt.Errorf("%v: Got request with no source ID", s.Hostname))
+		logErr(fmt.Errorf("%v: Got request with no source ID", s.Hostname))
 	} else {
 		now := time.Now()
 		stored := s.TCPInbound[msg.SourceID]
 		if msg.Index >= stored.NextIndex {
-			if msg.Index == stored.NextIndex {
+			if msg.Index == stored.NextIndex && stored.LastSuccessTime != nil {
 				// This is a consecutive message so we can record the time between
 				// messages.  We use this to adjust our expiration times based
 				// on load.
-				append(stored.TimeBetweenMessages, now - stored.LastSuccessTime)
+				stored.TimeBetweenMessages = append(stored.TimeBetweenMessages, now.Sub(*stored.LastSuccessTime))
 				if len(stored.TimeBetweenMessages) > msgHistory {
 					stored.TimeBetweenMessages = stored.TimeBetweenMessages[1:]
 				}
 			}
 
 			// Store the index and the current time.
-			stored.LastSuccessTime = now
+			stored.LastSuccessTime = &now
 			stored.LastSuccessIndex = msg.Index
 
 			// Update the next index we expect.
@@ -229,26 +237,7 @@ func (s *State) servePing(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Send the original request back as the response.
-	s.appendErr(json.NewEncoder(w).Encode(&msg))
-}
-
-// appendErr adds err to the list, if err is not nil. s must be locked.
-func (s *State) appendErr(err error) {
-	if err != nil {
-		s.Errors = append(s.Errors, err.Error())
-	}
-}
-
-// Logf writes to the log message list. s must not be locked.
-// s's Log member will drop an old message if it would otherwise
-// become longer than 500 messages.
-func (s *State) Logf(format string, args ...interface{}) {
-	s.lock.Lock()
-	defer s.lock.Unlock()
-	s.Log = append(s.Log, fmt.Sprintf(format, args...))
-	if len(s.Log) > 500 {
-		s.Log = s.Log[1:]
-	}
+	logErr(json.NewEncoder(w).Encode(&msg))
 }
 
 func (s *State) monitorTCPPeer(endpoint string) {
@@ -258,6 +247,7 @@ func (s *State) monitorTCPPeer(endpoint string) {
 	// need to hold the lock for this, but only want to hold it for the minimum amount
 	// of time.
 	func () {
+		log.Printf("Processing endpoing: %s", endpoint)
 		s.lock.Lock()
 		defer s.lock.Unlock()
 
@@ -268,7 +258,7 @@ func (s *State) monitorTCPPeer(endpoint string) {
 	}()
 
 	// Send the HTTP ping request.
-	s.Logf("Attempting to contact %s", endpoint)
+	log.Printf("Attempting to contact %s", endpoint)
 	body, err := json.Marshal(&HTTPPingMessage{
 		Index:    index,
 		SourceID: s.Hostname,
@@ -278,7 +268,7 @@ func (s *State) monitorTCPPeer(endpoint string) {
 	}
 	resp, err := http.Post(endpoint + "/ping", "application/json", bytes.NewReader(body))
 	if err != nil {
-		state.Logf("Warning: unable to contact the endpoint %q: %v", e, err)
+		log.Printf("Warning: unable to contact the endpoint %q: %v", endpoint, err)
 		return
 	}
 	defer resp.Body.Close()
@@ -286,39 +276,47 @@ func (s *State) monitorTCPPeer(endpoint string) {
 	// Read the response.
 	body, err = ioutil.ReadAll(resp.Body)
 	if err != nil {
-		state.Logf("Warning: unable to read response from '%v': '%v'", e, err)
+		log.Printf("Warning: unable to read response from '%v': '%v'", endpoint, err)
 		return
 	}
+	log.Printf("Response from endpoint: %v", string(body))
+
 	var response HTTPPingMessage
 	err = json.Unmarshal(body, &response)
 	if err != nil {
-		state.Logf("Warning: unable to unmarshal response (%v) from '%v': '%v'", string(body), e, err)
+		log.Printf("Warning: unable to unmarshal response (%v) from '%v': '%v'", string(body), endpoint, err)
 		return
 	}
 
 	func() {
+		log.Printf("Successful response")
 		s.lock.Lock()
 		defer s.lock.Unlock()
 
 		now := time.Now()
-		stored := s.TCPOutbound[endpoint]
-		if index == stored.LastSuccessIndex + 1 {
+		data := s.TCPOutbound[endpoint]
+		log.Printf("Index: %d, %d", index, data.LastSuccessIndex)
+		if index == data.LastSuccessIndex + 1 && data.LastSuccessTime != nil {
 			// This is a consecutive message so we can record the time between
 			// messages.  We use this to adjust our expiration times based
 			// on load.
-			append(stored.TimeBetweenMessages, now - stored.LastSuccessTime)
-			if len(stored.TimeBetweenMessages) > msgHistory {
-				stored.TimeBetweenMessages = stored.TimeBetweenMessages[1:]
+			log.Printf("Update time between messages")
+			data.TimeBetweenMessages = append(data.TimeBetweenMessages, now.Sub(*data.LastSuccessTime))
+			if len(data.TimeBetweenMessages) > msgHistory {
+				data.TimeBetweenMessages = data.TimeBetweenMessages[1:]
 			}
 		}
-		if index > stored.LastSuccessIndex {
-			stored.LastSuccessIndex = index
-			stored.LastSuccessTime = now
+		if index > data.LastSuccessIndex {
+			log.Printf("Update last success time")
+			data.LastSuccessIndex = index
+			data.LastSuccessTime = &now
 		}
+		s.TCPOutbound[endpoint] = data
 	}()
 }
 
 func main() {
+	log.Printf("Parsing arguments")
 	flag.Parse()
 
 	if *service == "" {
@@ -331,6 +329,7 @@ func main() {
 	}
 
 	if *delayShutdown > 0 {
+		log.Printf("Configure delayed shutdown")
 		termCh := make(chan os.Signal)
 		signal.Notify(termCh, syscall.SIGTERM)
 		go func() {
@@ -341,34 +340,46 @@ func main() {
 		}()
 	}
 
+	log.Printf("Initialize state")
 	state := State{
 		Hostname:             hostname,
-		TCPOutbound:          map[string]*TCPMessage{},
-		TCPInbound:           map[string]*TCPMessage{},
+		TCPOutbound:          map[string]TCPMessage{},
+		TCPInbound:           map[string]TCPMessage{},
 	}
 
 	go monitorPeers(&state)
 
+	log.Printf("Configure handler functions")
 	http.HandleFunc("/quit", func(w http.ResponseWriter, r *http.Request) {
 		os.Exit(0)
 	})
 	http.HandleFunc("/summary", state.serveSummary)
-	http.HandleFunc("/detailed", state.serveDetailed)
+	http.HandleFunc("/details", state.serveDetails)
 	http.HandleFunc("/ping", state.servePing)
 
 	// Start up the server on the required ports - by default the inter-pod communication
 	// is on a different port to the UX.  Both can be handled by the same default
 	// handler though.
-	go log.Fatal(http.ListenAndServe(fmt.Sprintf("0.0.0.0:%d", *tcpPort), nil))
-	if uiPort != tcpPort {
-		go log.Fatal(http.ListenAndServe(fmt.Sprintf("0.0.0.0:%d", *uiPort), nil))
+	log.Printf("Listening on inter-pod port: %d", *tcpPort)
+	go listenAndServe(*tcpPort)
+	if *uiPort != *tcpPort {
+		log.Printf("Listening on monitor port: %d", *uiPort)
+		go listenAndServe(*uiPort)
 	}
 
 	select {}
 }
 
+func listenAndServe(port int) {
+	err := http.ListenAndServe(fmt.Sprintf("0.0.0.0:%d", port), nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
 // Find all sibling pods in the service and post to their /write handler.
 func monitorPeers(state *State) {
+	log.Printf("Monitor peers")
 	client, err := client.NewInCluster()
 	if err != nil {
 		log.Fatalf("Unable to create client; error: %v\n", err)
@@ -386,7 +397,7 @@ func monitorPeers(state *State) {
 		if tcp_eps.Len() >= *numPeers {
 			break
 		}
-		state.Logf("%v/%v has %v TCP endpoints (%v), which is fewer than %v as expected. Waiting for all endpoints to come up.", *namespace, *service, len(tcp_eps), tcp_eps.List(), *numPeers)
+		log.Printf("%v/%v has %v TCP endpoints (%v), which is fewer than %v as expected. Waiting for all endpoints to come up.", *namespace, *service, len(tcp_eps), tcp_eps.List(), *numPeers)
 	}
 
 	// Do this repeatedly, in case there's some propagation delay with getting
@@ -406,14 +417,14 @@ func getEndpoints(client *client.Client) sets.String {
 	endpoints, err := client.Endpoints(*namespace).Get(*service)
 	tcp_eps := sets.String{}
 	if err != nil {
-		state.Logf("Unable to read the endpoints for %v/%v: %v.", *namespace, *service, err)
-		return eps
+		log.Printf("Unable to read the endpoints for %v/%v: %v.", *namespace, *service, err)
+		return tcp_eps
 	}
 	for _, ss := range endpoints.Subsets {
 		for _, a := range ss.Addresses {
 			for _, p := range ss.Ports {
-				if p.Protocol == api.ProtocolTCP {
-					eps.Insert(fmt.Sprintf("http://%s:%d", a.IP, p.Port))
+				if p.Protocol == api.ProtocolTCP && p.Name == *remoteTCPPortName {
+					tcp_eps.Insert(fmt.Sprintf("http://%s:%d", a.IP, p.Port))
 				}
 			}
 		}
