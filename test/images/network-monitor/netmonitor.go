@@ -16,7 +16,8 @@ limitations under the License.
 
 // Based on the network-tester, this implements a network monitor that can
 // be used to continuously monitor connectivity between a netmonitor container
-// and a set of peer netmonitors (discovered through namespace/service query).
+// and a set of peer netmonitor containers (discovered through namespace/service
+// query).
 //
 // Connectivity between the containers is monitored using a lightweight web
 // server (for TCP traffic).  This container tracks when the last message was
@@ -32,6 +33,10 @@ limitations under the License.
 //
 // The internal facing webserver serves up the following:
 // /ping
+//
+// The external UI uses a different port to the internal inter-container "ping" port.
+// This allows policy lockdown of the inter-container port whilst still being able to
+// monitor the connectivity through the UI port.
 package main
 
 import (
@@ -106,12 +111,15 @@ var (
 	msgHistory = 3
 )
 
+// Log an error message to stdout.
 func logErr(err error) {
 	if err != nil {
 		log.Printf("Error: %v", err)
 	}
 }
 
+// Look at the current TCP message data to determine if the TCP connection is currently
+// connected.
 func (t *TCPMessage) isConnected(now time.Time) bool {
 	if t.LastSuccessTime == nil {
 		return false
@@ -221,8 +229,7 @@ func (s *State) servePing(w http.ResponseWriter, r *http.Request) {
 			stored.NextIndex = msg.Index + 1
 		}
 
-		// Update the map to store the data for this connection.  This is only actually
-		// required when we create a new entry.
+		// Update the map to store the data for this connection.
 		s.TCPInbound[msg.SourceID] = stored
 	}
 
@@ -230,6 +237,7 @@ func (s *State) servePing(w http.ResponseWriter, r *http.Request) {
 	logErr(json.NewEncoder(w).Encode(&msg))
 }
 
+// Monitor a single TCP peer by sending an HTTP ping and waiting for the response.
 func (s *State) monitorTCPPeer(endpoint string) {
 	var index int
 
@@ -263,7 +271,7 @@ func (s *State) monitorTCPPeer(endpoint string) {
 	}
 	defer resp.Body.Close()
 
-	// Read the response.
+	// Read and unmarshal the response.
 	body, err = ioutil.ReadAll(resp.Body)
 	if err != nil {
 		log.Printf("Warning: unable to read response from '%v': '%v'", endpoint, err)
@@ -278,6 +286,7 @@ func (s *State) monitorTCPPeer(endpoint string) {
 		return
 	}
 
+	// Update our state information based on the response.
 	func() {
 		log.Printf("Successful response")
 		s.lock.Lock()
@@ -296,6 +305,7 @@ func (s *State) monitorTCPPeer(endpoint string) {
 				data.TimeBetweenMessages = data.TimeBetweenMessages[1:]
 			}
 		}
+
 		if index > data.LastSuccessIndex {
 			log.Printf("Update last success time")
 			data.LastSuccessIndex = index
@@ -305,6 +315,71 @@ func (s *State) monitorTCPPeer(endpoint string) {
 	}()
 }
 
+// Find all sibling pods in the service and post to their /write handler.
+func (s *State) monitorPeers() {
+	log.Printf("Monitor peers")
+	client, err := client.NewInCluster()
+	if err != nil {
+		log.Fatalf("Unable to create client; error: %v\n", err)
+	}
+	// Double check that that worked by getting the server version.
+	if v, err := client.Discovery().ServerVersion(); err != nil {
+		log.Fatalf("Unable to get server version: %v\n", err)
+	} else {
+		log.Printf("Server version: %#v\n", v)
+	}
+
+	// Loop until we at least find the correct number of endpoints.
+	for {
+		tcp_eps := getEndpoints(client)
+		if tcp_eps.Len() >= *numPeers {
+			break
+		}
+		log.Printf("%v/%v has %v TCP endpoints (%v), which is fewer than %v as expected. Waiting for all endpoints to come up.", *namespace, *service, len(tcp_eps), tcp_eps.List(), *numPeers)
+	}
+
+	// Do this repeatedly, in case there's some propagation delay with getting
+	// newly started pods into the endpoints list.
+	for {
+		tcp_eps := getEndpoints(client)
+		for ep := range tcp_eps {
+			s.monitorTCPPeer(ep)
+		}
+		time.Sleep(5 * time.Second)
+	}
+}
+
+// Listen to a particular port and serve responses.
+func listenAndServe(port int) {
+	err := http.ListenAndServe(fmt.Sprintf("0.0.0.0:%d", port), nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
+// getEndpoints returns the endpoints as set of String:
+// -  TCP endpoints:  "http://{ip}:{port}"
+func getEndpoints(client *client.Client) sets.String {
+	endpoints, err := client.Endpoints(*namespace).Get(*service)
+	tcp_eps := sets.String{}
+	if err != nil {
+		log.Printf("Unable to read the endpoints for %v/%v: %v.", *namespace, *service, err)
+		return tcp_eps
+	}
+	for _, ss := range endpoints.Subsets {
+		for _, a := range ss.Addresses {
+			for _, p := range ss.Ports {
+				// Inter-pod ping ports are discovered by name.
+				if p.Protocol == api.ProtocolTCP && p.Name == *remoteTCPPortName {
+					tcp_eps.Insert(fmt.Sprintf("http://%s:%d", a.IP, p.Port))
+				}
+			}
+		}
+	}
+	return tcp_eps
+}
+
+// Main.  Parse arguments, initialize state, start monitoring and start the web servers.
 func main() {
 	log.Printf("Parsing arguments")
 	flag.Parse()
@@ -337,7 +412,7 @@ func main() {
 		TCPInbound:  map[string]TCPMessage{},
 	}
 
-	go monitorPeers(&state)
+	go state.monitorPeers()
 
 	log.Printf("Configure handler functions")
 	http.HandleFunc("/quit", func(w http.ResponseWriter, r *http.Request) {
@@ -358,66 +433,4 @@ func main() {
 	}
 
 	select {}
-}
-
-func listenAndServe(port int) {
-	err := http.ListenAndServe(fmt.Sprintf("0.0.0.0:%d", port), nil)
-	if err != nil {
-		log.Fatal(err)
-	}
-}
-
-// Find all sibling pods in the service and post to their /write handler.
-func monitorPeers(state *State) {
-	log.Printf("Monitor peers")
-	client, err := client.NewInCluster()
-	if err != nil {
-		log.Fatalf("Unable to create client; error: %v\n", err)
-	}
-	// Double check that that worked by getting the server version.
-	if v, err := client.Discovery().ServerVersion(); err != nil {
-		log.Fatalf("Unable to get server version: %v\n", err)
-	} else {
-		log.Printf("Server version: %#v\n", v)
-	}
-
-	// Loop until we at least find the correct number of endpoints.
-	for {
-		tcp_eps := getEndpoints(client)
-		if tcp_eps.Len() >= *numPeers {
-			break
-		}
-		log.Printf("%v/%v has %v TCP endpoints (%v), which is fewer than %v as expected. Waiting for all endpoints to come up.", *namespace, *service, len(tcp_eps), tcp_eps.List(), *numPeers)
-	}
-
-	// Do this repeatedly, in case there's some propagation delay with getting
-	// newly started pods into the endpoints list.
-	for {
-		tcp_eps := getEndpoints(client)
-		for ep := range tcp_eps {
-			state.monitorTCPPeer(ep)
-		}
-		time.Sleep(5 * time.Second)
-	}
-}
-
-// getEndpoints returns the endpoints as set of String:
-// -  TCP endpoints:  "http://{ip}:{port}"
-func getEndpoints(client *client.Client) sets.String {
-	endpoints, err := client.Endpoints(*namespace).Get(*service)
-	tcp_eps := sets.String{}
-	if err != nil {
-		log.Printf("Unable to read the endpoints for %v/%v: %v.", *namespace, *service, err)
-		return tcp_eps
-	}
-	for _, ss := range endpoints.Subsets {
-		for _, a := range ss.Addresses {
-			for _, p := range ss.Ports {
-				if p.Protocol == api.ProtocolTCP && p.Name == *remoteTCPPortName {
-					tcp_eps.Insert(fmt.Sprintf("http://%s:%d", a.IP, p.Port))
-				}
-			}
-		}
-	}
-	return tcp_eps
 }
