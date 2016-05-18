@@ -35,7 +35,6 @@ import (
 	"github.com/pborman/uuid"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
-	"google.golang.org/api/compute/v1"
 )
 
 var instanceNamePrefix = flag.String("instance-name-prefix", "", "prefix for instance names")
