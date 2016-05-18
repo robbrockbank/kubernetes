@@ -48,21 +48,19 @@ We run a number of permutations of the following:
 -  Policy on, but with rules allowing communication between the namespaces.
 -  Both services in the same namespace (so should never be isolated)
 -  Both services in different namespaces (so will be isolated based on policy)
- */
+*/
 
 // Summary is the data returned by /summary API on the network monitor container
 type Summary struct {
-	TCPNumOutboundConnected   int
-	TCPNumOutboundFailed      int
-	TCPNumInboundConnected    int
-	TCPNumInboundFailed       int
+	TCPNumOutboundConnected int
+	TCPNumInboundConnected  int
 }
 
 const (
-	serviceAName          = "service-a"
-	serviceBName          = "service-b"
-	netMonitorContainer   = "robbrockbank/netmonitor:1.0"
-	convergenceTimeout    = 1  // minutes
+	serviceAName        = "service-a"
+	serviceBName        = "service-b"
+	netMonitorContainer = "robbrockbank/netmonitor:1.0"
+	convergenceTimeout  = 1 // Connection convergence timeout in minutes
 )
 
 var _ = framework.KubeDescribe("NetworkPolicy", func() {
@@ -93,14 +91,14 @@ func runIsolatedToBidirectionalTest(f *framework.Framework) {
 	// These tests use two namespaces.  A single namespace is created by
 	// default.  Create another and store both separately for clarity.
 	nsA := f.Namespace
-	nsB, err := f.CreateNamespace(f.BaseName + "-b", map[string]string{
+	nsB, err := f.CreateNamespace(f.BaseName+"-b", map[string]string{
 		"e2e-framework": f.BaseName + "-b",
 	})
 	Expect(err).NotTo(HaveOccurred())
 
 	// Turn on isolation
-	setNetworkIsolationAnnotations(f, ns1, true)
-	setNetworkIsolationAnnotations(f, ns2, true)
+	setNetworkIsolationAnnotations(f, nsA, true)
+	setNetworkIsolationAnnotations(f, nsB, true)
 
 	// Get the available nodes.
 	nodes, err := framework.GetReadyNodes(f)
@@ -114,7 +112,7 @@ func runIsolatedToBidirectionalTest(f *framework.Framework) {
 			framework.Failf(fmt.Sprintf("The test requires two Ready nodes on %s, but found just one.", framework.TestContext.Provider))
 		}
 		framework.Logf("Only one ready node is detected. The test has limited scope in such setting. " +
-		"Rerun it with at least two nodes to get complete coverage.")
+			"Rerun it with at least two nodes to get complete coverage.")
 	}
 
 	// Create service A and B.  These are really just used
@@ -164,93 +162,37 @@ func runIsolatedToBidirectionalTest(f *framework.Framework) {
 
 	// Open up port 8080 so that we can access the network monitor port
 	By("Checking full isolation")
-	addNetworkPolicyOpenPort(f, ns1, "ui1", "8080", "TCP")
-	addNetworkPolicyOpenPort(f, ns2, "ui2", "8080", "TCP")
-	expected := Summary {
-		TCPNumOutboundConnected:  0,
-		TCPNumOutboundFailed:     len(nodes.Items),
-		TCPNumInboundConnected:   0,
-		TCPNumInboundFailed:      0,
+	addNetworkPolicyOpenPort(f, nsA, "ui1", "8080", "TCP")
+	addNetworkPolicyOpenPort(f, nsB, "ui2", "8080", "TCP")
+
+	// We expect full isolation between namespaces.  Monitor, wait for a little and
+	// re-check we are still isolated.
+	expected := Summary{
+		TCPNumOutboundConnected: 0,
+		TCPNumInboundConnected:  0,
 	}
 	monitorConnectivity(f, nsA, serviceA.Name, expected)
-	expected = Summary {
-		TCPNumOutboundConnected:  0,
-		TCPNumOutboundFailed:     1,
-		TCPNumInboundConnected:   0,
-		TCPNumInboundFailed:      0,
-	}
 	monitorConnectivity(f, nsB, serviceB.Name, expected)
 
-	/*
-	// Turn off isolation
-	setNetworkIsolationAnnotations(f, ns1, false)
-	setNetworkIsolationAnnotations(f, ns2, false)
+	By("Waiting and rechecking full isolation")
+	time.Sleep(10 * time.Second)
+	monitorConnectivity(f, nsA, serviceA.Name, expected)
+	monitorConnectivity(f, nsB, serviceB.Name, expected)
 
-	// Currently no isolation, so verify connectivity.  On service A we expect a connection
-	// from each service B pod on each node.  On service B we only expect a single service A
-	// connection.
-
-	By("Checking full connectivity with no isolation")
-	expected = Summary {
-		TCPNumOutboundConnected:  len(nodes.Items),
-		TCPNumOutboundFailed:     0,
-		TCPNumInboundConnected:   len(nodes.Items),
-		TCPNumInboundFailed:      0,
-	}
-	monitorConnectivity(f, ns1, serviceA.Name, expected)
-	expected = Summary {
-		TCPNumOutboundConnected:  1,
-		TCPNumOutboundFailed:     0,
-		TCPNumInboundConnected:   1,
-		TCPNumInboundFailed:      0,
-	}
-	monitorConnectivity(f, ns2, serviceB.Name, expected)
-
-	// Turn on isolation
-	waitInput()
-	setNetworkIsolationAnnotations(f, ns1, true)
-	setNetworkIsolationAnnotations(f, ns2, true)
-	waitInput()
-	// Add policy to both namespaces to accept all traffic to the UI port.
-	By("Checking full isolation between namespaces with isolation enabled and no inter-namespace policy")
-	//addNetworkPolicyOpenPort(f, ns1, "ui1", "8080", "TCP")
-	//addNetworkPolicyOpenPort(f, ns2, "ui2", "8080", "TCP")
-
-	// We now expect the two namespaces to be isolated, so previously connected
-	// services will now be failed.
-	expected = Summary {
-		TCPNumOutboundConnected:  0,
-		TCPNumOutboundFailed:     len(nodes.Items),
-		TCPNumInboundConnected:   0,
-		TCPNumInboundFailed:      len(nodes.Items),
-	}
-	monitorConnectivity(f, ns1, serviceA.Name, expected)
-	expected = Summary {
-		TCPNumOutboundConnected:  0,
-		TCPNumOutboundFailed:     1,
-		TCPNumInboundConnected:   0,
-		TCPNumInboundFailed:      1,
-	}
-	monitorConnectivity(f, ns2, serviceB.Name, expected)
-	*/
 	// Add policy to one namespaces to accept all traffic to the TCP port.  We should see
 	// mono-directional traffic.
 	By("Checking mono-directional isolation between namespaces with isolation enabled and policy applied to one namespace")
 	addNetworkPolicyOpenPort(f, nsB, "tcp", "8081", "TCP")
 
 	// We now expect the ingress TCP to service B to be allowed.
-	expected = Summary {
-		TCPNumOutboundConnected:  len(nodes.Items),
-		TCPNumOutboundFailed:     0,
-		TCPNumInboundConnected:   0,
-		TCPNumInboundFailed:      0,
+	expected = Summary{
+		TCPNumOutboundConnected: len(nodes.Items),
+		TCPNumInboundConnected:  0,
 	}
 	monitorConnectivity(f, nsA, serviceA.Name, expected)
-	expected = Summary {
-		TCPNumOutboundConnected:  0,
-		TCPNumOutboundFailed:     1,
-		TCPNumInboundConnected:   1,
-		TCPNumInboundFailed:      0,
+	expected = Summary{
+		TCPNumOutboundConnected: 0,
+		TCPNumInboundConnected:  1,
 	}
 	monitorConnectivity(f, nsB, serviceB.Name, expected)
 
@@ -260,24 +202,20 @@ func runIsolatedToBidirectionalTest(f *framework.Framework) {
 	addNetworkPolicyOpenPort(f, nsA, "tcp", "8081", "TCP")
 
 	// We now expect the ingress TCP to both services A and B to be allowed.
-	expected = Summary {
-		TCPNumOutboundConnected:  len(nodes.Items),
-		TCPNumOutboundFailed:     0,
-		TCPNumInboundConnected:   len(nodes.Items),
-		TCPNumInboundFailed:      0,
+	expected = Summary{
+		TCPNumOutboundConnected: len(nodes.Items),
+		TCPNumInboundConnected:  len(nodes.Items),
 	}
 	monitorConnectivity(f, nsA, serviceA.Name, expected)
-	expected = Summary {
-		TCPNumOutboundConnected:  1,
-		TCPNumOutboundFailed:     0,
-		TCPNumInboundConnected:   1,
-		TCPNumInboundFailed:      0,
+	expected = Summary{
+		TCPNumOutboundConnected: 1,
+		TCPNumInboundConnected:  1,
 	}
 	monitorConnectivity(f, nsB, serviceB.Name, expected)
 }
 
 // Create a service which exposes TCP ports 8080 (ui) and 8081 (inter-pod-connectivity).
-func createService(f *framework.Framework, namespace *api.Namespace, name string) (*api.Service) {
+func createService(f *framework.Framework, namespace *api.Namespace, name string) *api.Service {
 	By(fmt.Sprintf("Creating a service named %q in namespace %q", name, namespace.Name))
 	svc, err := f.Client.Services(namespace.Name).Create(&api.Service{
 		ObjectMeta: api.ObjectMeta{
@@ -334,9 +272,9 @@ func launchNetMonitorPods(f *framework.Framework, namespaceA *api.Namespace, nam
 
 // Create a network monitor pod which peers with other network monitor pods.
 func createPod(f *framework.Framework,
-		namespace *api.Namespace, peerNamespace *api.Namespace,
-		serviceName string, peerServiceName string,
-		numPeers int, node *api.Node) string {
+	namespace *api.Namespace, peerNamespace *api.Namespace,
+	serviceName string, peerServiceName string,
+	numPeers int, node *api.Node) string {
 	pod, err := f.Client.Pods(namespace.Name).Create(&api.Pod{
 		ObjectMeta: api.ObjectMeta{
 			GenerateName: serviceName + "-",
@@ -356,7 +294,7 @@ func createPod(f *framework.Framework,
 						// the netmonitor container finds peers by looking up list of svc endpoints.
 						// The A pod searches for the B pods.
 						fmt.Sprintf("--num-peers=%d", numPeers)},
-					Ports: []api.ContainerPort{{ContainerPort: 8080}, {ContainerPort: 8081}},
+					Ports:           []api.ContainerPort{{ContainerPort: 8080}, {ContainerPort: 8081}},
 					ImagePullPolicy: api.PullAlways,
 				},
 			},
@@ -499,10 +437,4 @@ func addNetworkPolicyOpenPort(f *framework.Framework, namespace *api.Namespace, 
 		framework.Logf("unexpected error: %v", err)
 	}
 	framework.Logf("Response: %s", response)
-}
-
-
-func waitInput() {
-	By("Sleeping for a bit")
-	time.Sleep(1 * time.Minute)
 }

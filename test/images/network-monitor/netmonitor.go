@@ -57,10 +57,10 @@ import (
 type TCPMessage struct {
 	// Values in this structure require the State lock to be held before
 	// reading or writing.
-	NextIndex             int
-	LastSuccessIndex      int
-	LastSuccessTime       *time.Time
-	TimeBetweenMessages   []time.Duration
+	NextIndex           int
+	LastSuccessIndex    int
+	LastSuccessTime     *time.Time
+	TimeBetweenMessages []time.Duration
 }
 
 // State tracks the internal connection state of all peers.
@@ -69,8 +69,8 @@ type State struct {
 	Hostname string
 
 	// The below fields require that lock is held before reading or writing.
-	TCPOutbound          map[string]TCPMessage
-	TCPInbound           map[string]TCPMessage
+	TCPOutbound map[string]TCPMessage
+	TCPInbound  map[string]TCPMessage
 
 	lock sync.Mutex
 }
@@ -84,10 +84,8 @@ type HTTPPingMessage struct {
 
 // Summary is returned by /summary
 type Summary struct {
-	TCPNumOutboundConnected   int
-	TCPNumOutboundFailed      int
-	TCPNumInboundConnected    int
-	TCPNumInboundFailed       int
+	TCPNumOutboundConnected int
+	TCPNumInboundConnected  int
 }
 
 var (
@@ -102,10 +100,10 @@ var (
 	delayShutdown     = flag.Int("delay-shutdown", 0, "Number of seconds to delay shutdown when receiving SIGTERM.")
 
 	// Our one and only state object
-	state         State
+	state State
 
 	// Number of message times to keep track of
-	msgHistory    = 3
+	msgHistory = 3
 )
 
 func logErr(err error) {
@@ -144,9 +142,7 @@ func (t *TCPMessage) isConnected(now time.Time) bool {
 // counts of successful inbound and outbound peers connections.
 // e.g.
 //   {
-//     "TCPNumInboundFailed": 4,
 //     "TCPNumInboundConnected": 10,
-//     "TCPNumOutboundFailed": 0,
 //     "TCPNumOutboundConnected": 4
 //   }
 func (s *State) serveSummary(w http.ResponseWriter, r *http.Request) {
@@ -156,25 +152,19 @@ func (s *State) serveSummary(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now()
 	summary := Summary{
-		TCPNumInboundFailed: 0,
-		TCPNumInboundConnected: 0,
-		TCPNumOutboundFailed: 0,
+		TCPNumInboundConnected:  0,
 		TCPNumOutboundConnected: 0,
 	}
 
 	for _, v := range s.TCPOutbound {
 		if v.isConnected(now) {
 			summary.TCPNumOutboundConnected += 1
-		} else {
-			summary.TCPNumOutboundFailed += 1
 		}
 	}
 
 	for _, v := range s.TCPInbound {
 		if v.isConnected(now) {
 			summary.TCPNumInboundConnected += 1
-		} else {
-			summary.TCPNumInboundFailed += 1
 		}
 	}
 
@@ -246,7 +236,7 @@ func (s *State) monitorTCPPeer(endpoint string) {
 	// Obtain the current index for this peer and increment it in our shared data.  We
 	// need to hold the lock for this, but only want to hold it for the minimum amount
 	// of time.
-	func () {
+	func() {
 		log.Printf("Processing endpoing: %s", endpoint)
 		s.lock.Lock()
 		defer s.lock.Unlock()
@@ -266,7 +256,7 @@ func (s *State) monitorTCPPeer(endpoint string) {
 	if err != nil {
 		log.Fatalf("json marshal error: %v", err)
 	}
-	resp, err := http.Post(endpoint + "/ping", "application/json", bytes.NewReader(body))
+	resp, err := http.Post(endpoint+"/ping", "application/json", bytes.NewReader(body))
 	if err != nil {
 		log.Printf("Warning: unable to contact the endpoint %q: %v", endpoint, err)
 		return
@@ -296,7 +286,7 @@ func (s *State) monitorTCPPeer(endpoint string) {
 		now := time.Now()
 		data := s.TCPOutbound[endpoint]
 		log.Printf("Index: %d, %d", index, data.LastSuccessIndex)
-		if index == data.LastSuccessIndex + 1 && data.LastSuccessTime != nil {
+		if index == data.LastSuccessIndex+1 && data.LastSuccessTime != nil {
 			// This is a consecutive message so we can record the time between
 			// messages.  We use this to adjust our expiration times based
 			// on load.
@@ -342,9 +332,9 @@ func main() {
 
 	log.Printf("Initialize state")
 	state := State{
-		Hostname:             hostname,
-		TCPOutbound:          map[string]TCPMessage{},
-		TCPInbound:           map[string]TCPMessage{},
+		Hostname:    hostname,
+		TCPOutbound: map[string]TCPMessage{},
+		TCPInbound:  map[string]TCPMessage{},
 	}
 
 	go monitorPeers(&state)
