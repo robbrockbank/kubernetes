@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright 2016 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,9 +22,7 @@ import (
 	"k8s.io/kubernetes/pkg/util/validation/field"
 )
 
-func ValidateClusterName(name string, prefix bool) (bool, string) {
-	return validation.NameIsDNSSubdomain(name, prefix)
-}
+var ValidateClusterName = validation.NameIsDNSSubdomain
 
 func ValidateClusterSpec(spec *federation.ClusterSpec, fieldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}

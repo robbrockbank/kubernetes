@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"path"
 	rt "runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -90,6 +91,7 @@ type APIGroupVersion struct {
 	Typer     runtime.ObjectTyper
 	Creater   runtime.ObjectCreater
 	Convertor runtime.ObjectConvertor
+	Copier    runtime.ObjectCopier
 	Linker    runtime.SelfLinker
 
 	Admit   admission.Interface
@@ -164,7 +166,6 @@ func (g *APIGroupVersion) newInstaller() *APIInstaller {
 // TODO: document all handlers
 // InstallVersionHandler registers the APIServer's `/version` handler
 func InstallVersionHandler(mux Mux, container *restful.Container) {
-
 	// Set up a service to return the git code version.
 	versionWS := new(restful.WebService)
 	versionWS.Path("/version")
@@ -174,7 +175,8 @@ func InstallVersionHandler(mux Mux, container *restful.Container) {
 			Doc("get the code version").
 			Operation("getCodeVersion").
 			Produces(restful.MIME_JSON).
-			Consumes(restful.MIME_JSON))
+			Consumes(restful.MIME_JSON).
+			Writes(version.Info{}))
 
 	container.Add(versionWS)
 }
@@ -252,9 +254,9 @@ type stripVersionEncoder struct {
 	serializer runtime.Serializer
 }
 
-func (c stripVersionEncoder) EncodeToStream(obj runtime.Object, w io.Writer, overrides ...unversioned.GroupVersion) error {
+func (c stripVersionEncoder) Encode(obj runtime.Object, w io.Writer) error {
 	buf := bytes.NewBuffer([]byte{})
-	err := c.encoder.EncodeToStream(obj, buf, overrides...)
+	err := c.encoder.Encode(obj, buf)
 	if err != nil {
 		return err
 	}
@@ -265,7 +267,7 @@ func (c stripVersionEncoder) EncodeToStream(obj runtime.Object, w io.Writer, ove
 	gvk.Group = ""
 	gvk.Version = ""
 	roundTrippedObj.GetObjectKind().SetGroupVersionKind(*gvk)
-	return c.serializer.EncodeToStream(roundTrippedObj, w)
+	return c.serializer.Encode(roundTrippedObj, w)
 }
 
 // StripVersionNegotiatedSerializer will return stripVersionEncoder when
@@ -440,7 +442,7 @@ func writeNegotiated(s runtime.NegotiatedSerializer, gv unversioned.GroupVersion
 	w.WriteHeader(statusCode)
 
 	encoder := s.EncoderForVersion(serializer, gv)
-	if err := encoder.EncodeToStream(object, w); err != nil {
+	if err := encoder.Encode(object, w); err != nil {
 		errorJSONFatal(err, encoder, w)
 	}
 }
@@ -449,6 +451,11 @@ func writeNegotiated(s runtime.NegotiatedSerializer, gv unversioned.GroupVersion
 func errorNegotiated(err error, s runtime.NegotiatedSerializer, gv unversioned.GroupVersion, w http.ResponseWriter, req *http.Request) int {
 	status := errToAPIStatus(err)
 	code := int(status.Code)
+	// when writing an error, check to see if the status indicates a retry after period
+	if status.Details != nil && status.Details.RetryAfterSeconds > 0 {
+		delay := strconv.Itoa(int(status.Details.RetryAfterSeconds))
+		w.Header().Set("Retry-After", delay)
+	}
 	writeNegotiated(s, gv, w, req, code, status)
 	return code
 }

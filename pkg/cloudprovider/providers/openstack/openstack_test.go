@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -31,6 +31,7 @@ import (
 const volumeAvailableStatus = "available"
 const volumeInUseStatus = "in-use"
 const volumeCreateTimeoutSeconds = 30
+const testClusterName = "testCluster"
 
 func WaitForVolumeStatus(t *testing.T, os *OpenStack, volumeName string, status string, timeoutSeconds int) {
 	timeout := timeoutSeconds
@@ -67,15 +68,15 @@ func TestReadConfig(t *testing.T) {
 	}
 
 	cfg, err := readConfig(strings.NewReader(`
-[Global]
-auth-url = http://auth.url
-username = user
-[LoadBalancer]
-create-monitor = yes
-monitor-delay = 1m
-monitor-timeout = 30s
-monitor-max-retries = 3
-`))
+ [Global]
+ auth-url = http://auth.url
+ username = user
+ [LoadBalancer]
+ create-monitor = yes
+ monitor-delay = 1m
+ monitor-timeout = 30s
+ monitor-max-retries = 3
+ `))
 	if err != nil {
 		t.Fatalf("Should succeed when a valid config is provided: %s", err)
 	}
@@ -204,6 +205,8 @@ func TestLoadBalancer(t *testing.T) {
 		t.Skipf("No config found in environment")
 	}
 
+	cfg.LoadBalancer.LBVersion = "v1"
+
 	os, err := newOpenStack(cfg)
 	if err != nil {
 		t.Fatalf("Failed to construct/authenticate OpenStack: %s", err)
@@ -214,7 +217,33 @@ func TestLoadBalancer(t *testing.T) {
 		t.Fatalf("LoadBalancer() returned false - perhaps your stack doesn't support Neutron?")
 	}
 
-	_, exists, err := lb.GetLoadBalancer(&api.Service{ObjectMeta: api.ObjectMeta{Name: "noexist"}})
+	_, exists, err := lb.GetLoadBalancer(testClusterName, &api.Service{ObjectMeta: api.ObjectMeta{Name: "noexist"}})
+	if err != nil {
+		t.Fatalf("GetLoadBalancer(\"noexist\") returned error: %s", err)
+	}
+	if exists {
+		t.Fatalf("GetLoadBalancer(\"noexist\") returned exists")
+	}
+}
+
+func TestLoadBalancerV2(t *testing.T) {
+	cfg, ok := configFromEnv()
+	if !ok {
+		t.Skipf("No config found in environment")
+	}
+	cfg.LoadBalancer.LBVersion = "v2"
+
+	os, err := newOpenStack(cfg)
+	if err != nil {
+		t.Fatalf("Failed to construct/authenticate OpenStack: %s", err)
+	}
+
+	lbaas, ok := os.LoadBalancer()
+	if !ok {
+		t.Fatalf("LoadBalancer() returned false - perhaps your stack doesn't support Neutron?")
+	}
+
+	_, exists, err := lbaas.GetLoadBalancer(testClusterName, &api.Service{ObjectMeta: api.ObjectMeta{Name: "noexist"}})
 	if err != nil {
 		t.Fatalf("GetLoadBalancer(\"noexist\") returned error: %s", err)
 	}

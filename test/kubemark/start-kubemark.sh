@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Copyright 2015 The Kubernetes Authors All rights reserved.
+# Copyright 2015 The Kubernetes Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -36,6 +36,7 @@ sed -i'' -e "s/\"//g" "${RESOURCE_DIRECTORY}/scheduler_flags"
 ${CONTROLLER_MANAGER_TEST_ARGS}
 --allocate-node-cidrs="${ALLOCATE_NODE_CIDRS}"
 --cluster-cidr="${CLUSTER_IP_RANGE}"
+--service-cluster-ip-range="${SERVICE_CLUSTER_IP_RANGE}"
 --terminated-pod-gc-threshold="${TERMINATED_POD_GC_THRESHOLD}"
 EOF
 sed -i'' -e "s/\"//g" "${RESOURCE_DIRECTORY}/controllers_flags"
@@ -56,7 +57,19 @@ fi
 
 CURR_DIR=`pwd`
 cd "${MAKE_DIR}"
-make
+RETRIES=3
+for attempt in $(seq 1 ${RETRIES}); do
+  if ! make; then
+    if [[ $((attempt)) -eq "${RETRIES}" ]]; then
+      echo "${color_red}Make failed. Exiting.${color_norm}"
+      exit 1
+    fi
+    echo -e "${color_yellow}Make attempt $(($attempt)) failed. Retrying.${color_norm}" >& 2
+    sleep $(($attempt * 5))
+  else
+    break
+  fi
+done
 rm kubemark
 cd $CURR_DIR
 
@@ -67,8 +80,16 @@ run-gcloud-compute-with-retries disks create "${MASTER_NAME}-pd" \
   --type "${MASTER_DISK_TYPE}" \
   --size "${MASTER_DISK_SIZE}"
 
+run-gcloud-compute-with-retries addresses create "${MASTER_NAME}-ip" \
+  --project "${PROJECT}" \
+  --region "${REGION}" -q
+
+MASTER_IP=$(gcloud compute addresses describe "${MASTER_NAME}-ip" \
+  --project "${PROJECT}" --region "${REGION}" -q --format='value(address)')
+
 run-gcloud-compute-with-retries instances create "${MASTER_NAME}" \
   ${GCLOUD_COMMON_ARGS} \
+  --address "${MASTER_IP}" \
   --machine-type "${MASTER_SIZE}" \
   --image-project="${MASTER_IMAGE_PROJECT}" \
   --image "${MASTER_IMAGE}" \
@@ -83,9 +104,6 @@ run-gcloud-compute-with-retries firewall-rules create "${INSTANCE_PREFIX}-kubema
   --source-ranges "0.0.0.0/0" \
   --target-tags "${MASTER_TAG}" \
   --allow "tcp:443"
-
-MASTER_IP=$(gcloud compute instances describe ${MASTER_NAME} \
-  --zone="${ZONE}" --project="${PROJECT}" | grep natIP: | cut -f2 -d":" | sed "s/ //g")
 
 if [ "${SEPARATE_EVENT_MACHINE:-false}" == "true" ]; then
   EVENT_STORE_NAME="${INSTANCE_PREFIX}-event-store"
@@ -114,8 +132,8 @@ if [ "${SEPARATE_EVENT_MACHINE:-false}" == "true" ]; then
   gcloud compute ssh "${EVENT_STORE_NAME}" --zone="${ZONE}" --project="${PROJECT}" \
     --command="sudo docker run --net=host -d gcr.io/google_containers/etcd:2.0.12 /usr/local/bin/etcd \
       --listen-peer-urls http://127.0.0.1:2380 \
-      --addr=127.0.0.1:4002 \
-      --bind-addr=0.0.0.0:4002 \
+      --advertise-client-urls=http://127.0.0.1:4002 \
+      --listen-client-urls=http://0.0.0.0:4002 \
       --data-dir=/var/etcd/data"
 fi
 
@@ -125,9 +143,9 @@ create-certs ${MASTER_IP}
 KUBELET_TOKEN=$(dd if=/dev/urandom bs=128 count=1 2>/dev/null | base64 | tr -d "=+/" | dd bs=32 count=1 2>/dev/null)
 KUBE_PROXY_TOKEN=$(dd if=/dev/urandom bs=128 count=1 2>/dev/null | base64 | tr -d "=+/" | dd bs=32 count=1 2>/dev/null)
 
-echo "${CA_CERT_BASE64}" | base64 -d > "${RESOURCE_DIRECTORY}/ca.crt"
-echo "${KUBECFG_CERT_BASE64}" | base64 -d > "${RESOURCE_DIRECTORY}/kubecfg.crt"
-echo "${KUBECFG_KEY_BASE64}" | base64 -d > "${RESOURCE_DIRECTORY}/kubecfg.key"
+echo "${CA_CERT_BASE64}" | base64 --decode > "${RESOURCE_DIRECTORY}/ca.crt"
+echo "${KUBECFG_CERT_BASE64}" | base64 --decode > "${RESOURCE_DIRECTORY}/kubecfg.crt"
+echo "${KUBECFG_KEY_BASE64}" | base64 --decode > "${RESOURCE_DIRECTORY}/kubecfg.key"
 
 until gcloud compute ssh --zone="${ZONE}" --project="${PROJECT}" "${MASTER_NAME}" --command="ls" &> /dev/null; do
   sleep 1
@@ -137,11 +155,11 @@ password=$(python -c 'import string,random; print("".join(random.SystemRandom().
 
 gcloud compute ssh --zone="${ZONE}" --project="${PROJECT}" "${MASTER_NAME}" \
   --command="sudo mkdir /srv/kubernetes -p && \
-    sudo bash -c \"echo ${MASTER_CERT_BASE64} | base64 -d > /srv/kubernetes/server.cert\" && \
-    sudo bash -c \"echo ${MASTER_KEY_BASE64} | base64 -d > /srv/kubernetes/server.key\" && \
-    sudo bash -c \"echo ${CA_CERT_BASE64} | base64 -d > /srv/kubernetes/ca.crt\" && \
-    sudo bash -c \"echo ${KUBECFG_CERT_BASE64} | base64 -d > /srv/kubernetes/kubecfg.crt\" && \
-    sudo bash -c \"echo ${KUBECFG_KEY_BASE64} | base64 -d > /srv/kubernetes/kubecfg.key\" && \
+    sudo bash -c \"echo ${MASTER_CERT_BASE64} | base64 --decode > /srv/kubernetes/server.cert\" && \
+    sudo bash -c \"echo ${MASTER_KEY_BASE64} | base64 --decode > /srv/kubernetes/server.key\" && \
+    sudo bash -c \"echo ${CA_CERT_BASE64} | base64 --decode > /srv/kubernetes/ca.crt\" && \
+    sudo bash -c \"echo ${KUBECFG_CERT_BASE64} | base64 --decode > /srv/kubernetes/kubecfg.crt\" && \
+    sudo bash -c \"echo ${KUBECFG_KEY_BASE64} | base64 --decode > /srv/kubernetes/kubecfg.key\" && \
     sudo bash -c \"echo \"${KUBE_BEARER_TOKEN},admin,admin\" > /srv/kubernetes/known_tokens.csv\" && \
     sudo bash -c \"echo \"${KUBELET_TOKEN},kubelet,kubelet\" >> /srv/kubernetes/known_tokens.csv\" && \
     sudo bash -c \"echo \"${KUBE_PROXY_TOKEN},kube_proxy,kube_proxy\" >> /srv/kubernetes/known_tokens.csv\" && \
@@ -170,7 +188,7 @@ else
 fi
 
 gcloud compute ssh "${MASTER_NAME}" --zone="${ZONE}" --project="${PROJECT}" \
-  --command="chmod a+x configure-kubectl.sh && chmod a+x start-kubemark-master.sh && sudo ./start-kubemark-master.sh ${EVENT_STORE_IP:-127.0.0.1}"
+  --command="chmod a+x configure-kubectl.sh && chmod a+x start-kubemark-master.sh && sudo ./start-kubemark-master.sh ${EVENT_STORE_IP:-127.0.0.1} ${NUM_NODES:-0}"
 
 # create kubeconfig for Kubelet:
 KUBECONFIG_CONTENTS=$(echo "apiVersion: v1

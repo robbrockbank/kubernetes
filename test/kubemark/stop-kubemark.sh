@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Copyright 2015 The Kubernetes Authors All rights reserved.
+# Copyright 2015 The Kubernetes Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -31,6 +31,11 @@ gcloud compute instances delete "${MASTER_NAME}" \
 
 gcloud compute disks delete "${MASTER_NAME}-pd" \
     ${GCLOUD_COMMON_ARGS} || true
+
+gcloud compute addresses delete "${MASTER_NAME}-ip" \
+    --project "${PROJECT}" \
+    --region "${REGION}" \
+    --quiet || true
 
 gcloud compute firewall-rules delete "${INSTANCE_PREFIX}-kubemark-master-https" \
 	--project "${PROJECT}" \

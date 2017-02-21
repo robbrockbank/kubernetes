@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -378,10 +378,12 @@ func TestGenerate(t *testing.T) {
 		},
 	}
 	generator := BasicReplicationController{}
-	for _, test := range tests {
+	for i, test := range tests {
 		obj, err := generator.Generate(test.params)
+		t.Logf("%d: %#v", i, obj)
 		if !test.expectErr && err != nil {
 			t.Errorf("unexpected error: %v", err)
+			continue
 		}
 		if test.expectErr && err != nil {
 			continue
@@ -856,8 +858,13 @@ func TestParseEnv(t *testing.T) {
 			envArray: []string{
 				"WITH_OUT_VALUES=",
 			},
-			expected:  []api.EnvVar{},
-			expectErr: true,
+			expected: []api.EnvVar{
+				{
+					Name:  "WITH_OUT_VALUES",
+					Value: "",
+				},
+			},
+			expectErr: false,
 			test:      "test case 3",
 		},
 		{

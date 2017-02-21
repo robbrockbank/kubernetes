@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2015 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,6 +18,8 @@ package runtime
 
 import (
 	gojson "encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"strings"
 
@@ -52,12 +54,12 @@ func (s unstructuredJSONScheme) Decode(data []byte, _ *unversioned.GroupVersionK
 	return obj, &gvk, nil
 }
 
-func (unstructuredJSONScheme) EncodeToStream(obj Object, w io.Writer, overrides ...unversioned.GroupVersion) error {
+func (unstructuredJSONScheme) Encode(obj Object, w io.Writer) error {
 	switch t := obj.(type) {
 	case *Unstructured:
 		return json.NewEncoder(w).Encode(t.Object)
 	case *UnstructuredList:
-		var items []map[string]interface{}
+		items := make([]map[string]interface{}, 0, len(t.Items))
 		for _, i := range t.Items {
 			items = append(items, i.Object)
 		}
@@ -93,12 +95,20 @@ func (s unstructuredJSONScheme) decode(data []byte) (Object, error) {
 	err := s.decodeToUnstructured(data, unstruct)
 	return unstruct, err
 }
+
 func (s unstructuredJSONScheme) decodeInto(data []byte, obj Object) error {
 	switch x := obj.(type) {
 	case *Unstructured:
 		return s.decodeToUnstructured(data, x)
 	case *UnstructuredList:
 		return s.decodeToList(data, x)
+	case *VersionedObjects:
+		u := new(Unstructured)
+		err := s.decodeToUnstructured(data, u)
+		if err == nil {
+			x.Objects = []Object{u}
+		}
+		return err
 	default:
 		return json.Unmarshal(data, x)
 	}
@@ -151,4 +161,40 @@ func (s unstructuredJSONScheme) decodeToList(data []byte, list *UnstructuredList
 		list.Items = append(list.Items, unstruct)
 	}
 	return nil
+}
+
+// UnstructuredObjectConverter is an ObjectConverter for use with
+// Unstructured objects. Since it has no schema or type information,
+// it will only succeed for no-op conversions. This is provided as a
+// sane implementation for APIs that require an object converter.
+type UnstructuredObjectConverter struct{}
+
+func (UnstructuredObjectConverter) Convert(in, out interface{}) error {
+	unstructIn, ok := in.(*Unstructured)
+	if !ok {
+		return fmt.Errorf("input type %T in not valid for unstructured conversion", in)
+	}
+
+	unstructOut, ok := out.(*Unstructured)
+	if !ok {
+		return fmt.Errorf("output type %T in not valid for unstructured conversion", out)
+	}
+
+	// maybe deep copy the map? It is documented in the
+	// ObjectConverter interface that this function is not
+	// guaranteeed to not mutate the input. Or maybe set the input
+	// object to nil.
+	unstructOut.Object = unstructIn.Object
+	return nil
+}
+
+func (UnstructuredObjectConverter) ConvertToVersion(in Object, outVersion unversioned.GroupVersion) (Object, error) {
+	if gvk := in.GetObjectKind().GroupVersionKind(); gvk.GroupVersion() != outVersion {
+		return nil, errors.New("unstructured converter cannot convert versions")
+	}
+	return in, nil
+}
+
+func (UnstructuredObjectConverter) ConvertFieldLabel(version, kind, label, value string) (string, string, error) {
+	return "", "", errors.New("unstructured cannot convert field labels")
 }

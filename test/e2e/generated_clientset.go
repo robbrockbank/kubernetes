@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,15 +17,15 @@ limitations under the License.
 package e2e
 
 import (
-	"fmt"
 	"strconv"
 	"time"
 
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/v1"
 	"k8s.io/kubernetes/pkg/labels"
-	"k8s.io/kubernetes/pkg/util"
+	"k8s.io/kubernetes/pkg/runtime"
 	"k8s.io/kubernetes/pkg/util/intstr"
+	"k8s.io/kubernetes/pkg/util/uuid"
 	"k8s.io/kubernetes/pkg/watch"
 	"k8s.io/kubernetes/test/e2e/framework"
 
@@ -46,7 +46,7 @@ func testingPod(name, value string) v1.Pod {
 			Containers: []v1.Container{
 				{
 					Name:  "nginx",
-					Image: "gcr.io/google_containers/nginx:1.7.9",
+					Image: "gcr.io/google_containers/nginx-slim:0.7",
 					Ports: []v1.ContainerPort{{ContainerPort: 80}},
 					LivenessProbe: &v1.Probe{
 						Handler: v1.Handler{
@@ -70,11 +70,11 @@ func observePodCreation(w watch.Interface) {
 			framework.Failf("Failed to observe pod creation: %v", event)
 		}
 	case <-time.After(framework.PodStartTimeout):
-		Fail("Timeout while waiting for pod creation")
+		framework.Failf("Timeout while waiting for pod creation")
 	}
 }
 
-func observePodDeletion(w watch.Interface) (lastPod *api.Pod) {
+func observeObjectDeletion(w watch.Interface) (obj runtime.Object) {
 	deleted := false
 	timeout := false
 	timer := time.After(60 * time.Second)
@@ -82,7 +82,7 @@ func observePodDeletion(w watch.Interface) (lastPod *api.Pod) {
 		select {
 		case event, _ := <-w.ResultChan():
 			if event.Type == watch.Deleted {
-				lastPod = event.Object.(*api.Pod)
+				obj = event.Object
 				deleted = true
 			}
 		case <-timer:
@@ -90,7 +90,7 @@ func observePodDeletion(w watch.Interface) (lastPod *api.Pod) {
 		}
 	}
 	if !deleted {
-		Fail("Failed to observe pod deletion")
+		framework.Failf("Failed to observe pod deletion")
 	}
 	return
 }
@@ -100,7 +100,7 @@ var _ = framework.KubeDescribe("Generated release_1_2 clientset", func() {
 	It("should create pods, delete pods, watch pods", func() {
 		podClient := f.Clientset_1_2.Core().Pods(f.Namespace.Name)
 		By("constructing the pod")
-		name := "pod" + string(util.NewUUID())
+		name := "pod" + string(uuid.NewUUID())
 		value := strconv.Itoa(time.Now().Nanosecond())
 		podCopy := testingPod(name, value)
 		pod := &podCopy
@@ -155,14 +155,15 @@ var _ = framework.KubeDescribe("Generated release_1_2 clientset", func() {
 		}
 
 		By("verifying pod deletion was observed")
-		lastPod := observePodDeletion(w)
+		obj := observeObjectDeletion(w)
+		lastPod := obj.(*api.Pod)
 		Expect(lastPod.DeletionTimestamp).ToNot(BeNil())
 		Expect(lastPod.Spec.TerminationGracePeriodSeconds).ToNot(BeZero())
 
 		options = api.ListOptions{LabelSelector: selector}
 		pods, err = podClient.List(options)
 		if err != nil {
-			Fail(fmt.Sprintf("Failed to list pods to verify deletion: %v", err))
+			framework.Failf("Failed to list pods to verify deletion: %v", err)
 		}
 		Expect(len(pods.Items)).To(Equal(0))
 	})
@@ -173,7 +174,7 @@ var _ = framework.KubeDescribe("Generated release_1_3 clientset", func() {
 	It("should create pods, delete pods, watch pods", func() {
 		podClient := f.Clientset_1_3.Core().Pods(f.Namespace.Name)
 		By("constructing the pod")
-		name := "pod" + string(util.NewUUID())
+		name := "pod" + string(uuid.NewUUID())
 		value := strconv.Itoa(time.Now().Nanosecond())
 		podCopy := testingPod(name, value)
 		pod := &podCopy
@@ -228,14 +229,15 @@ var _ = framework.KubeDescribe("Generated release_1_3 clientset", func() {
 		}
 
 		By("verifying pod deletion was observed")
-		lastPod := observePodDeletion(w)
+		obj := observeObjectDeletion(w)
+		lastPod := obj.(*v1.Pod)
 		Expect(lastPod.DeletionTimestamp).ToNot(BeNil())
 		Expect(lastPod.Spec.TerminationGracePeriodSeconds).ToNot(BeZero())
 
 		options = api.ListOptions{LabelSelector: selector}
 		pods, err = podClient.List(options)
 		if err != nil {
-			Fail(fmt.Sprintf("Failed to list pods to verify deletion: %v", err))
+			framework.Failf("Failed to list pods to verify deletion: %v", err)
 		}
 		Expect(len(pods.Items)).To(Equal(0))
 	})

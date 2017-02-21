@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright 2016 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,48 +18,72 @@ limitations under the License.
 package webhook
 
 import (
+	"fmt"
+	"time"
+
 	"k8s.io/kubernetes/pkg/api/unversioned"
-	"k8s.io/kubernetes/pkg/apis/authentication.k8s.io/v1beta1"
+	"k8s.io/kubernetes/pkg/apis/authentication/v1beta1"
 	"k8s.io/kubernetes/pkg/auth/authenticator"
 	"k8s.io/kubernetes/pkg/auth/user"
+	"k8s.io/kubernetes/pkg/client/restclient"
+	"k8s.io/kubernetes/pkg/util/cache"
 	"k8s.io/kubernetes/plugin/pkg/webhook"
 
-	_ "k8s.io/kubernetes/pkg/apis/authentication.k8s.io/install"
+	_ "k8s.io/kubernetes/pkg/apis/authentication/install"
 )
 
 var (
 	groupVersions = []unversioned.GroupVersion{v1beta1.SchemeGroupVersion}
 )
 
+const retryBackoff = 500 * time.Millisecond
+
 // Ensure WebhookTokenAuthenticator implements the authenticator.Token interface.
 var _ authenticator.Token = (*WebhookTokenAuthenticator)(nil)
 
 type WebhookTokenAuthenticator struct {
 	*webhook.GenericWebhook
+	responseCache *cache.LRUExpireCache
+	ttl           time.Duration
 }
 
 // New creates a new WebhookTokenAuthenticator from the provided kubeconfig file.
-func New(kubeConfigFile string) (*WebhookTokenAuthenticator, error) {
-	gw, err := webhook.NewGenericWebhook(kubeConfigFile, groupVersions)
+func New(kubeConfigFile string, ttl time.Duration) (*WebhookTokenAuthenticator, error) {
+	return newWithBackoff(kubeConfigFile, ttl, retryBackoff)
+}
+
+// newWithBackoff allows tests to skip the sleep.
+func newWithBackoff(kubeConfigFile string, ttl, initialBackoff time.Duration) (*WebhookTokenAuthenticator, error) {
+	gw, err := webhook.NewGenericWebhook(kubeConfigFile, groupVersions, initialBackoff)
 	if err != nil {
 		return nil, err
 	}
-	return &WebhookTokenAuthenticator{gw}, nil
+	return &WebhookTokenAuthenticator{gw, cache.NewLRUExpireCache(1024), ttl}, nil
 }
 
-// AuthenticateToken
+// AuthenticateToken implements the authenticator.Token interface.
 func (w *WebhookTokenAuthenticator) AuthenticateToken(token string) (user.Info, bool, error) {
 	r := &v1beta1.TokenReview{
-		Spec: v1beta1.TokenReviewSpec{
-			Token: token,
-		},
+		Spec: v1beta1.TokenReviewSpec{Token: token},
 	}
-	result := w.RestClient.Post().Body(r).Do()
-	if err := result.Error(); err != nil {
-		return nil, false, err
-	}
-	if err := result.Into(r); err != nil {
-		return nil, false, err
+	if entry, ok := w.responseCache.Get(r.Spec); ok {
+		r.Status = entry.(v1beta1.TokenReviewStatus)
+	} else {
+		result := w.WithExponentialBackoff(func() restclient.Result {
+			return w.RestClient.Post().Body(r).Do()
+		})
+		if err := result.Error(); err != nil {
+			return nil, false, err
+		}
+		var statusCode int
+		if result.StatusCode(&statusCode); statusCode < 200 || statusCode >= 300 {
+			return nil, false, fmt.Errorf("Error contacting webhook: %d", statusCode)
+		}
+		spec := r.Spec
+		if err := result.Into(r); err != nil {
+			return nil, false, err
+		}
+		w.responseCache.Add(spec, r.Status, w.ttl)
 	}
 	if !r.Status.Authenticated {
 		return nil, false, nil

@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -32,9 +32,9 @@ import (
 	"k8s.io/kubernetes/pkg/apimachinery/registered"
 	client "k8s.io/kubernetes/pkg/client/unversioned"
 	"k8s.io/kubernetes/pkg/labels"
-	"k8s.io/kubernetes/pkg/util"
 	"k8s.io/kubernetes/pkg/util/intstr"
 	utilnet "k8s.io/kubernetes/pkg/util/net"
+	"k8s.io/kubernetes/pkg/util/uuid"
 	"k8s.io/kubernetes/pkg/util/wait"
 	"k8s.io/kubernetes/test/e2e/framework"
 )
@@ -457,13 +457,14 @@ func (config *KubeProxyTestConfig) createService(serviceSpec *api.Service) *api.
 
 func (config *KubeProxyTestConfig) setup() {
 	By("creating a selector")
-	selectorName := "selector-" + string(util.NewUUID())
+	selectorName := "selector-" + string(uuid.NewUUID())
 	serviceSelector := map[string]string{
 		selectorName: "true",
 	}
 
 	By("Getting node addresses")
-	nodeList := framework.ListSchedulableNodesOrDie(config.f.Client)
+	framework.ExpectNoError(framework.WaitForAllNodesSchedulable(config.f.Client))
+	nodeList := framework.GetReadySchedulableNodesOrDie(config.f.Client)
 	config.externalAddrs = framework.NodeAddresses(nodeList, api.NodeExternalIP)
 	if len(config.externalAddrs) < 2 {
 		// fall back to legacy IPs
@@ -501,7 +502,8 @@ func (config *KubeProxyTestConfig) cleanup() {
 }
 
 func (config *KubeProxyTestConfig) createNetProxyPods(podName string, selector map[string]string) []*api.Pod {
-	nodes := framework.ListSchedulableNodesOrDie(config.f.Client)
+	framework.ExpectNoError(framework.WaitForAllNodesSchedulable(config.f.Client))
+	nodes := framework.GetReadySchedulableNodesOrDie(config.f.Client)
 
 	// create pods, one for each node
 	createdPods := make([]*api.Pod, 0, len(nodes.Items))

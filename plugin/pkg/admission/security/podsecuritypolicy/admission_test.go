@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright 2016 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -42,6 +42,12 @@ func NewTestAdmission(store cache.Store, kclient clientset.Interface) kadmission
 		strategyFactory: kpsp.NewSimpleStrategyFactory(),
 		pspMatcher:      getMatchingPolicies,
 	}
+}
+
+func useInitContainers(pod *kapi.Pod) *kapi.Pod {
+	pod.Spec.InitContainers = pod.Spec.Containers
+	pod.Spec.Containers = []kapi.Container{}
+	return pod
 }
 
 func TestAdmitPrivileged(t *testing.T) {
@@ -203,6 +209,18 @@ func TestAdmitCaps(t *testing.T) {
 			}
 		}
 	}
+
+	for k, v := range tc {
+		useInitContainers(v.pod)
+		testPSPAdmit(k, v.psps, v.pod, v.shouldPass, v.expectedPSP, t)
+
+		if v.expectedCapabilities != nil {
+			if !reflect.DeepEqual(v.expectedCapabilities, v.pod.Spec.InitContainers[0].SecurityContext.Capabilities) {
+				t.Errorf("%s resulted in caps that were not expected - expected: %v, received: %v", k, v.expectedCapabilities, v.pod.Spec.InitContainers[0].SecurityContext.Capabilities)
+			}
+		}
+	}
+
 }
 
 func TestAdmitVolumes(t *testing.T) {
@@ -233,6 +251,10 @@ func TestAdmitVolumes(t *testing.T) {
 		psp := restrictivePSP()
 
 		// expect a denial for this PSP
+		testPSPAdmit(fmt.Sprintf("%s denial", string(fsType)), []*extensions.PodSecurityPolicy{psp}, pod, false, "", t)
+
+		// also expect a denial for this PSP if it's an init container
+		useInitContainers(pod)
 		testPSPAdmit(fmt.Sprintf("%s denial", string(fsType)), []*extensions.PodSecurityPolicy{psp}, pod, false, "", t)
 
 		// now add the fstype directly to the psp and it should validate
@@ -304,6 +326,18 @@ func TestAdmitHostNetwork(t *testing.T) {
 			}
 		}
 	}
+
+	// test again with init containers
+	for k, v := range tests {
+		useInitContainers(v.pod)
+		testPSPAdmit(k, v.psps, v.pod, v.shouldPass, v.expectedPSP, t)
+
+		if v.shouldPass {
+			if v.pod.Spec.SecurityContext.HostNetwork != v.expectedHostNetwork {
+				t.Errorf("%s expected hostNetwork to be %t", k, v.expectedHostNetwork)
+			}
+		}
+	}
 }
 
 func TestAdmitHostPorts(t *testing.T) {
@@ -360,8 +394,11 @@ func TestAdmitHostPorts(t *testing.T) {
 		},
 	}
 
-	for k, v := range tests {
-		testPSPAdmit(k, v.psps, v.pod, v.shouldPass, v.expectedPSP, t)
+	for i := 0; i < 2; i++ {
+		for k, v := range tests {
+			v.pod.Spec.Containers, v.pod.Spec.InitContainers = v.pod.Spec.InitContainers, v.pod.Spec.Containers
+			testPSPAdmit(k, v.psps, v.pod, v.shouldPass, v.expectedPSP, t)
+		}
 	}
 }
 
@@ -919,7 +956,7 @@ func testPSPAdmit(testCaseName string, psps []*extensions.PodSecurityPolicy, pod
 
 	plugin := NewTestAdmission(store, tc)
 
-	attrs := kadmission.NewAttributesRecord(pod, kapi.Kind("Pod").WithVersion("version"), "namespace", "", kapi.Resource("pods").WithVersion("version"), "", kadmission.Create, &user.DefaultInfo{})
+	attrs := kadmission.NewAttributesRecord(pod, nil, kapi.Kind("Pod").WithVersion("version"), "namespace", "", kapi.Resource("pods").WithVersion("version"), "", kadmission.Create, &user.DefaultInfo{})
 	err := plugin.Admit(attrs)
 
 	if shouldPass && err != nil {
@@ -1159,7 +1196,8 @@ func createNamespaceForTest() *kapi.Namespace {
 func createSAForTest() *kapi.ServiceAccount {
 	return &kapi.ServiceAccount{
 		ObjectMeta: kapi.ObjectMeta{
-			Name: "default",
+			Namespace: "default",
+			Name:      "default",
 		},
 	}
 }

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Copyright 2015 The Kubernetes Authors All rights reserved.
+# Copyright 2015 The Kubernetes Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -46,32 +46,44 @@ fi
 
 if [[ ${JOB_NAME} =~ -pull- ]]; then
   : ${JENKINS_GCS_LOGS_PATH:="gs://kubernetes-jenkins/pr-logs/pull/${ghprbPullId:-unknown}"}
+  : ${JENKINS_GCS_LATEST_PATH:="gs://kubernetes-jenkins/pr-logs/directory"}
+  : ${JENKINS_GCS_LOGS_INDIRECT:="gs://kubernetes-jenkins/pr-logs/directory/${JOB_NAME}"}
 else
   : ${JENKINS_GCS_LOGS_PATH:="gs://kubernetes-jenkins/logs"}
+  : ${JENKINS_GCS_LATEST_PATH:="gs://kubernetes-jenkins/logs"}
+  : ${JENKINS_GCS_LOGS_INDIRECT:=""}
 fi
 
 readonly artifacts_path="${WORKSPACE}/_artifacts"
 readonly gcs_job_path="${JENKINS_GCS_LOGS_PATH}/${JOB_NAME}"
 readonly gcs_build_path="${gcs_job_path}/${BUILD_NUMBER}"
+readonly gcs_latest_path="${JENKINS_GCS_LATEST_PATH}/${JOB_NAME}"
+readonly gcs_indirect_path="${JENKINS_GCS_LOGS_INDIRECT}"
 readonly gcs_acl="public-read"
 readonly results_url=${gcs_build_path//"gs:/"/"https://console.cloud.google.com/storage/browser"}
 readonly timestamp=$(date +%s)
 
-function upload_version() {
-  echo -n 'Run starting at '; date -d "@${timestamp}"
-
-  # Try to discover the kubernetes version.
-  local version=""
+#########################################################################
+# Try to discover the kubernetes version.
+# prints version
+function find_version() {
   if [[ -e "version" ]]; then
-    version=$(cat "version")
+    cat version
   elif [[ -e "hack/lib/version.sh" ]]; then
-    version=$(
-      export KUBE_ROOT="."
-      source "hack/lib/version.sh"
-      kube::version::get_version_vars
-      echo "${KUBE_GIT_VERSION-}"
+    (
+    export KUBE_ROOT="."
+    source "hack/lib/version.sh"
+    kube::version::get_version_vars
+    echo "${KUBE_GIT_VERSION-}"
     )
   fi
+}
+
+function upload_version() {
+  local -r version=$(find_version)
+  local upload_attempt
+
+  echo -n 'Run starting at '; date -d "@${timestamp}"
 
   if [[ -n "${version}" ]]; then
     echo "Found Kubernetes version: ${version}"
@@ -93,8 +105,52 @@ function upload_version() {
   done
 }
 
+#########################################################################
+# Maintain a single file storing the full build version, Jenkins' job number
+# build state.  Limit its size so it does not grow unbounded.
+# This is primarily used for and by the
+# github.com/kubernetes/release/find_green_build tool.
+# @param build_result - the state of the build
+#
+function update_job_result_cache() {
+  local -r build_result=$1
+  local -r version=$(find_version)
+  local -r job_results=${gcs_job_path}/jobResultsCache.json
+  local -r tmp_results="${WORKSPACE}/_tmp/jobResultsCache.tmp"
+  local -r cache_size=200
+  local upload_attempt
+
+  if [[ -n "${version}" ]]; then
+    echo "Found Kubernetes version: ${version}"
+  else
+    echo "Could not find Kubernetes version"
+  fi
+
+  mkdir -p ${tmp_results%/*}
+
+  for upload_attempt in $(seq 3); do
+    echo "Copying ${job_results} to ${tmp_results} (attempt ${upload_attempt})"
+    gsutil -q cp ${job_results} ${tmp_results} 2>&- || continue
+    break
+  done
+
+  echo "{\"version\": \"${version}\", \"buildnumber\": \"${BUILD_NUMBER}\"," \
+       "\"result\": \"${build_result}\"}" >> ${tmp_results}
+
+  for upload_attempt in $(seq 3); do
+    echo "Copying ${tmp_results} to ${job_results} (attempt ${upload_attempt})"
+    gsutil -q -h "Content-Type:application/json" cp -a "${gcs_acl}" \
+           <(tail -${cache_size} ${tmp_results}) ${job_results} || continue
+    break
+  done
+
+  rm -f ${tmp_results}
+}
+
 function upload_artifacts_and_build_result() {
   local -r build_result=$1
+  local upload_attempt
+
   echo -n 'Run finished at '; date -d "@${timestamp}"
 
   for upload_attempt in $(seq 3); do
@@ -111,11 +167,29 @@ function upload_artifacts_and_build_result() {
       gsutil -m -q -o "GSUtil:use_magicfile=True" cp -a "${gcs_acl}" -r -c \
         -z log,txt,xml "${artifacts_path}" "${gcs_build_path}/artifacts" || continue
     fi
+    if [[ -e "${WORKSPACE}/build-log.txt" ]]; then
+      echo "Uploading build log"
+      gsutil -q cp -Z -a "${gcs_acl}" "${WORKSPACE}/build-log.txt" "${gcs_build_path}"
+    fi
+
+    # For pull jobs, keep a canonical ordering for tools that want to examine
+    # the output.
+    if [[ "${gcs_indirect_path}" != "" ]]; then
+      echo "Writing ${gcs_build_path} to ${gcs_indirect_path}/${BUILD_NUMBER}.txt"
+      echo "${gcs_build_path}" | \
+        gsutil -q -h "Content-Type:text/plain" \
+          cp -a "${gcs_acl}" - "${gcs_indirect_path}/${BUILD_NUMBER}.txt" || continue
+      echo "Marking build ${BUILD_NUMBER} as the latest completed build for this PR"
+      echo "${BUILD_NUMBER}" | \
+        gsutil -q -h "Content-Type:text/plain" -h "Cache-Control:private, max-age=0, no-transform" \
+          cp -a "${gcs_acl}" - "${gcs_job_path}/latest-build.txt" || continue
+    fi
+
     # Mark this build as the latest completed.
     echo "Marking build ${BUILD_NUMBER} as the latest completed build"
     echo "${BUILD_NUMBER}" | \
       gsutil -q -h "Content-Type:text/plain" -h "Cache-Control:private, max-age=0, no-transform" \
-        cp -a "${gcs_acl}" - "${gcs_job_path}/latest-build.txt" || continue
+        cp -a "${gcs_acl}" - "${gcs_latest_path}/latest-build.txt" || continue
     break  # all uploads succeeded if we hit this point
   done
 
@@ -126,6 +200,7 @@ if [[ -n "${JENKINS_BUILD_STARTED:-}" ]]; then
   upload_version
 elif [[ -n "${JENKINS_BUILD_FINISHED:-}" ]]; then
   upload_artifacts_and_build_result ${JENKINS_BUILD_FINISHED}
+  update_job_result_cache ${JENKINS_BUILD_FINISHED}
 else
   echo "Called without JENKINS_BUILD_STARTED or JENKINS_BUILD_FINISHED set."
   echo "Assuming a legacy invocation."

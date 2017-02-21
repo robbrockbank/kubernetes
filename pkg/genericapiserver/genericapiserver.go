@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -35,17 +35,21 @@ import (
 	"k8s.io/kubernetes/pkg/api/rest"
 	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/apimachinery"
+	"k8s.io/kubernetes/pkg/apimachinery/registered"
 	"k8s.io/kubernetes/pkg/apiserver"
 	"k8s.io/kubernetes/pkg/auth/authenticator"
 	"k8s.io/kubernetes/pkg/auth/authorizer"
 	"k8s.io/kubernetes/pkg/auth/handlers"
 	"k8s.io/kubernetes/pkg/cloudprovider"
+	"k8s.io/kubernetes/pkg/genericapiserver/options"
+	genericvalidation "k8s.io/kubernetes/pkg/genericapiserver/validation"
 	"k8s.io/kubernetes/pkg/registry/generic"
 	"k8s.io/kubernetes/pkg/registry/generic/registry"
 	ipallocator "k8s.io/kubernetes/pkg/registry/service/ipallocator"
 	"k8s.io/kubernetes/pkg/runtime"
 	"k8s.io/kubernetes/pkg/ui"
 	"k8s.io/kubernetes/pkg/util"
+	"k8s.io/kubernetes/pkg/util/async"
 	"k8s.io/kubernetes/pkg/util/crypto"
 	utilnet "k8s.io/kubernetes/pkg/util/net"
 	utilruntime "k8s.io/kubernetes/pkg/util/runtime"
@@ -57,11 +61,7 @@ import (
 	"github.com/golang/glog"
 )
 
-const (
-	DefaultEtcdPathPrefix           = "/registry"
-	DefaultDeserializationCacheSize = 50000
-	globalTimeout                   = time.Minute
-)
+const globalTimeout = time.Minute
 
 // Info about an API group.
 type APIGroupInfo struct {
@@ -95,6 +95,7 @@ type APIGroupInfo struct {
 
 // Config is a structure used to configure a GenericAPIServer.
 type Config struct {
+	// The storage factory for other objects
 	StorageFactory StorageFactory
 	// allow downstream consumers to disable the core controller loops
 	EnableLogsSupport bool
@@ -120,6 +121,8 @@ type Config struct {
 	Authorizer             authorizer.Authorizer
 	AdmissionControl       admission.Interface
 	MasterServiceNamespace string
+	// TODO(ericchiang): Determine if policy escalation checks should be an admission controller.
+	AuthorizerRBACSuperUser string
 
 	// Map requests to contexts. Exported so downstream consumers can provider their own mappers
 	RequestContextMapper api.RequestContextMapper
@@ -220,7 +223,7 @@ type GenericAPIServer struct {
 	PublicReadWritePort  int
 	ServiceReadWriteIP   net.IP
 	ServiceReadWritePort int
-	masterServices       *util.Runner
+	masterServices       *async.Runner
 	ExtraServicePorts    []api.ServicePort
 	ExtraEndpointPorts   []api.EndpointPort
 
@@ -283,8 +286,7 @@ func setDefaults(c *Config) {
 		// We should probably allow this for clouds that don't require NodePort to do load-balancing (GCE)
 		// but then that breaks the strict nestedness of ServiceType.
 		// Review post-v1
-		defaultServiceNodePortRange := utilnet.PortRange{Base: 30000, Size: 2768}
-		c.ServiceNodePortRange = defaultServiceNodePortRange
+		c.ServiceNodePortRange = options.DefaultServiceNodePortRange
 		glog.Infof("Node port range unspecified. Defaulting to %v.", c.ServiceNodePortRange)
 	}
 	if c.MasterCount == 0 {
@@ -303,7 +305,7 @@ func setDefaults(c *Config) {
 	if len(c.ExternalHost) == 0 && c.PublicAddress != nil {
 		hostAndPort := c.PublicAddress.String()
 		if c.ReadWritePort != 0 {
-			hostAndPort = net.JoinHostPort(hostAndPort, strconv.Itoa(c.ServiceReadWritePort))
+			hostAndPort = net.JoinHostPort(hostAndPort, strconv.Itoa(c.ReadWritePort))
 		}
 		c.ExternalHost = hostAndPort
 	}
@@ -372,16 +374,14 @@ func New(c *Config) (*GenericAPIServer, error) {
 		apiGroupsForDiscovery:     map[string]unversioned.APIGroup{},
 	}
 
-	var handlerContainer *restful.Container
 	if c.RestfulContainer != nil {
 		s.mux = c.RestfulContainer.ServeMux
-		handlerContainer = c.RestfulContainer
+		s.HandlerContainer = c.RestfulContainer
 	} else {
 		mux := http.NewServeMux()
 		s.mux = mux
-		handlerContainer = NewHandlerContainer(mux, c.Serializer)
+		s.HandlerContainer = NewHandlerContainer(mux, c.Serializer)
 	}
-	s.HandlerContainer = handlerContainer
 	// Use CurlyRouter to be able to use regular expressions in paths. Regular expressions are required in paths for example for proxy (where the path is proxy/{kind}/{name}/{*})
 	s.HandlerContainer.Router(restful.CurlyRouter{})
 	s.MuxHelper = &apiserver.MuxHelper{Mux: s.mux, RegisteredPaths: []string{}}
@@ -491,13 +491,13 @@ func (s *GenericAPIServer) init(c *Config) {
 
 	// After all wrapping is done, put a context filter around both handlers
 	if handler, err := api.NewRequestContextFilter(s.RequestContextMapper, s.Handler); err != nil {
-		glog.Fatalf("Could not initialize request context filter: %v", err)
+		glog.Fatalf("Could not initialize request context filter for s.Handler: %v", err)
 	} else {
 		s.Handler = handler
 	}
 
 	if handler, err := api.NewRequestContextFilter(s.RequestContextMapper, s.InsecureHandler); err != nil {
-		glog.Fatalf("Could not initialize request context filter: %v", err)
+		glog.Fatalf("Could not initialize request context filter for s.InsecureHandler: %v", err)
 	} else {
 		s.InsecureHandler = handler
 	}
@@ -537,18 +537,7 @@ func (s *GenericAPIServer) installGroupsDiscoveryHandler() {
 	})
 }
 
-// TODO: Longer term we should read this from some config store, rather than a flag.
-func verifyClusterIPFlags(options *ServerRunOptions) {
-	if options.ServiceClusterIPRange.IP == nil {
-		glog.Fatal("No --service-cluster-ip-range specified")
-	}
-	var ones, bits = options.ServiceClusterIPRange.Mask.Size()
-	if bits-ones > 20 {
-		glog.Fatal("Specified --service-cluster-ip-range is too large")
-	}
-}
-
-func NewConfig(options *ServerRunOptions) *Config {
+func NewConfig(options *options.ServerRunOptions) *Config {
 	return &Config{
 		APIGroupPrefix:            options.APIGroupPrefix,
 		APIPrefix:                 options.APIPrefix,
@@ -571,26 +560,8 @@ func NewConfig(options *ServerRunOptions) *Config {
 	}
 }
 
-func verifyServiceNodePort(options *ServerRunOptions) {
-	if options.KubernetesServiceNodePort > 0 && !options.ServiceNodePortRange.Contains(options.KubernetesServiceNodePort) {
-		glog.Fatalf("Kubernetes service port range %v doesn't contain %v", options.ServiceNodePortRange, (options.KubernetesServiceNodePort))
-	}
-}
-
-func verifyEtcdServersList(options *ServerRunOptions) {
-	if len(options.StorageConfig.ServerList) == 0 {
-		glog.Fatalf("--etcd-servers must be specified")
-	}
-}
-
-func ValidateRunOptions(options *ServerRunOptions) {
-	verifyClusterIPFlags(options)
-	verifyServiceNodePort(options)
-	verifyEtcdServersList(options)
-}
-
-func DefaultAndValidateRunOptions(options *ServerRunOptions) {
-	ValidateRunOptions(options)
+func DefaultAndValidateRunOptions(options *options.ServerRunOptions) {
+	genericvalidation.ValidateRunOptions(options)
 
 	// If advertise-address is not specified, use bind-address. If bind-address
 	// is not usable (unset, 0.0.0.0, or loopback), we will use the host's default
@@ -635,11 +606,11 @@ func DefaultAndValidateRunOptions(options *ServerRunOptions) {
 	}
 }
 
-func (s *GenericAPIServer) Run(options *ServerRunOptions) {
+func (s *GenericAPIServer) Run(options *options.ServerRunOptions) {
 	if s.enableSwaggerSupport {
 		s.InstallSwaggerAPI()
 	}
-	// We serve on 2 ports. See docs/accessing_the_api.md
+	// We serve on 2 ports. See docs/admin/accessing-the-api.md
 	secureLocation := ""
 	if options.SecurePort != 0 {
 		secureLocation = net.JoinHostPort(options.BindAddress.String(), strconv.Itoa(options.SecurePort))
@@ -668,8 +639,10 @@ func (s *GenericAPIServer) Run(options *ServerRunOptions) {
 			Handler:        apiserver.MaxInFlightLimit(sem, longRunningRequestCheck, apiserver.RecoverPanics(handler)),
 			MaxHeaderBytes: 1 << 20,
 			TLSConfig: &tls.Config{
-				// Change default from SSLv3 to TLSv1.0 (because of POODLE vulnerability)
-				MinVersion: tls.VersionTLS10,
+				// Can't use SSLv3 because of POODLE and BEAST
+				// Can't use TLSv1.0 because of POODLE and BEAST using CBC cipher
+				// Can't use TLSv1.1 because of RC4 cipher usage
+				MinVersion: tls.VersionTLS12,
 			},
 		}
 
@@ -694,7 +667,7 @@ func (s *GenericAPIServer) Run(options *ServerRunOptions) {
 			alternateDNS := []string{"kubernetes.default.svc", "kubernetes.default", "kubernetes"}
 			// It would be nice to set a fqdn subject alt name, but only the kubelets know, the apiserver is clueless
 			// alternateDNS = append(alternateDNS, "kubernetes.default.svc.CLUSTER.DNS.NAME")
-			if shouldGenSelfSignedCerts(options.TLSCertFile, options.TLSPrivateKeyFile) {
+			if crypto.ShouldGenSelfSignedCerts(options.TLSCertFile, options.TLSPrivateKeyFile) {
 				if err := crypto.GenerateSelfSignedCert(s.ClusterIP.String(), options.TLSCertFile, options.TLSPrivateKeyFile, alternateIPs, alternateDNS); err != nil {
 					glog.Errorf("Unable to generate self signed cert: %v", err)
 				} else {
@@ -729,30 +702,18 @@ func (s *GenericAPIServer) Run(options *ServerRunOptions) {
 		Handler:        apiserver.RecoverPanics(handler),
 		MaxHeaderBytes: 1 << 20,
 	}
+
 	glog.Infof("Serving insecurely on %s", insecureLocation)
-	glog.Fatal(http.ListenAndServe())
-}
-
-// If the file represented by path exists and
-// readable, return true otherwise return false.
-func canReadFile(path string) bool {
-	f, err := os.Open(path)
-	if err != nil {
-		return false
-	}
-
-	defer f.Close()
-
-	return true
-}
-
-func shouldGenSelfSignedCerts(certPath, keyPath string) bool {
-	if canReadFile(certPath) || canReadFile(keyPath) {
-		glog.Infof("using existing apiserver.crt and apiserver.key files")
-		return false
-	}
-
-	return true
+	go func() {
+		defer utilruntime.HandleCrash()
+		for {
+			if err := http.ListenAndServe(); err != nil {
+				glog.Errorf("Unable to listen for insecure (%v); will try again.", err)
+			}
+			time.Sleep(15 * time.Second)
+		}
+	}()
+	select {}
 }
 
 // Exposes the given group version in API.
@@ -857,29 +818,30 @@ func (s *GenericAPIServer) getAPIGroupVersion(apiGroupInfo *APIGroupInfo, groupV
 	for k, v := range apiGroupInfo.VersionedResourcesStorageMap[groupVersion.Version] {
 		storage[strings.ToLower(k)] = v
 	}
-	version, err := s.newAPIGroupVersion(apiGroupInfo.GroupMeta, groupVersion)
+	version, err := s.newAPIGroupVersion(apiGroupInfo, groupVersion)
 	version.Root = apiPrefix
 	version.Storage = storage
-	version.ParameterCodec = apiGroupInfo.ParameterCodec
-	version.Serializer = apiGroupInfo.NegotiatedSerializer
-	version.Creater = apiGroupInfo.Scheme
-	version.Convertor = apiGroupInfo.Scheme
-	version.Typer = apiGroupInfo.Scheme
-	version.SubresourceGroupVersionKind = apiGroupInfo.SubresourceGroupVersionKind
 	return version, err
 }
 
-func (s *GenericAPIServer) newAPIGroupVersion(groupMeta apimachinery.GroupMeta, groupVersion unversioned.GroupVersion) (*apiserver.APIGroupVersion, error) {
+func (s *GenericAPIServer) newAPIGroupVersion(apiGroupInfo *APIGroupInfo, groupVersion unversioned.GroupVersion) (*apiserver.APIGroupVersion, error) {
 	return &apiserver.APIGroupVersion{
 		RequestInfoResolver: s.NewRequestInfoResolver(),
 
 		GroupVersion: groupVersion,
-		Linker:       groupMeta.SelfLinker,
-		Mapper:       groupMeta.RESTMapper,
 
-		Admit:   s.AdmissionControl,
-		Context: s.RequestContextMapper,
+		ParameterCodec: apiGroupInfo.ParameterCodec,
+		Serializer:     apiGroupInfo.NegotiatedSerializer,
+		Creater:        apiGroupInfo.Scheme,
+		Convertor:      apiGroupInfo.Scheme,
+		Copier:         apiGroupInfo.Scheme,
+		Typer:          apiGroupInfo.Scheme,
+		SubresourceGroupVersionKind: apiGroupInfo.SubresourceGroupVersionKind,
+		Linker: apiGroupInfo.GroupMeta.SelfLinker,
+		Mapper: apiGroupInfo.GroupMeta.RESTMapper,
 
+		Admit:             s.AdmissionControl,
+		Context:           s.RequestContextMapper,
 		MinRequestTimeout: s.MinRequestTimeout,
 	}, nil
 }
@@ -900,6 +862,28 @@ func (s *GenericAPIServer) InstallSwaggerAPI() {
 		ApiPath:         "/swaggerapi/",
 		SwaggerPath:     "/swaggerui/",
 		SwaggerFilePath: "/swagger-ui/",
+		SchemaFormatHandler: func(typeName string) string {
+			switch typeName {
+			case "unversioned.Time", "*unversioned.Time":
+				return "date-time"
+			}
+			return ""
+		},
 	}
 	swagger.RegisterSwaggerService(swaggerConfig, s.HandlerContainer)
+}
+
+// NewDefaultAPIGroupInfo returns an APIGroupInfo stubbed with "normal" values
+// exposed for easier composition from other packages
+func NewDefaultAPIGroupInfo(group string) APIGroupInfo {
+	groupMeta := registered.GroupOrDie(group)
+
+	return APIGroupInfo{
+		GroupMeta:                    *groupMeta,
+		VersionedResourcesStorageMap: map[string]map[string]rest.Storage{},
+		OptionsExternalVersion:       &registered.GroupOrDie(api.GroupName).GroupVersion,
+		Scheme:                       api.Scheme,
+		ParameterCodec:               api.ParameterCodec,
+		NegotiatedSerializer:         api.Codecs,
+	}
 }

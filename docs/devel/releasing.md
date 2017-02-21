@@ -2,15 +2,15 @@
 
 <!-- BEGIN STRIP_FOR_RELEASE -->
 
-<img src="http://kubernetes.io/img/warning.png" alt="WARNING"
+<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
      width="25" height="25">
-<img src="http://kubernetes.io/img/warning.png" alt="WARNING"
+<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
      width="25" height="25">
-<img src="http://kubernetes.io/img/warning.png" alt="WARNING"
+<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
      width="25" height="25">
-<img src="http://kubernetes.io/img/warning.png" alt="WARNING"
+<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
      width="25" height="25">
-<img src="http://kubernetes.io/img/warning.png" alt="WARNING"
+<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
      width="25" height="25">
 
 <h2>PLEASE NOTE: This document applies to the HEAD of the source tree</h2>
@@ -21,7 +21,7 @@ refer to the docs that go with that version.
 <!-- TAG RELEASE_LINK, added by the munger automatically -->
 <strong>
 The latest release of this document can be found
-[here](http://releases.k8s.io/release-1.2/docs/devel/releasing.md).
+[here](http://releases.k8s.io/release-1.3/docs/devel/releasing.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -82,11 +82,11 @@ from, and other prerequisites.
   * You should still look for green tests, (see below).
 
 No matter what you're cutting, you're going to want to look at
-[Jenkins](http://go/k8s-test/).  Figure out what branch you're cutting from,
-(see above,) and look at the critical jobs building from that branch.  First
-glance through builds and look for nice solid rows of green builds, and then
-check temporally with the other critical builds to make sure they're solid
-around then as well.
+[Jenkins](http://kubekins.dls.corp.google.com/) (Google internal only).  Figure
+out what branch you're cutting from, (see above,) and look at the critical jobs
+building from that branch.  First glance through builds and look for nice solid
+rows of green builds, and then check temporally with the other critical builds
+to make sure they're solid around then as well.
 
 If you're doing an alpha release or cutting a new release series, you can
 choose an arbitrary build.  If you are doing an official release, you have to
@@ -153,7 +153,7 @@ Then, run
 
 This will do a dry run of the release.  It will give you instructions at the
 end for `pushd`ing into the dry-run directory and having a look around.
-`pushd` into the directory and make sure everythig looks as you expect:
+`pushd` into the directory and make sure everything looks as you expect:
 
 ```console
 git log "${RELEASE_VERSION}"  # do you see the commit you expect?
@@ -257,9 +257,11 @@ been automated that need to happen after the branch has been cut:
 *Please note that this information may be out of date.  The scripts are the
 authoritative source on how version injection works.*
 
-Kubernetes may be built from either a git tree (using `hack/build-go.sh`) or
-from a tarball (using either `hack/build-go.sh` or `go install`) or directly by
-the Go native build system (using `go get`).
+Kubernetes may be built from either a git tree or from a tarball.  We use
+`make` to encapsulate a number of build steps into a single command.  This
+includes generating code, which means that tools like `go build` might work
+(once files are generated) but might be using stale generated code.  `make` is
+the supported way to build.
 
 When building from git, we want to be able to insert specific information about
 the build tree at build time. In particular, we want to use the output of `git
@@ -294,7 +296,7 @@ yield binaries that will identify themselves as `v0.4-dev` and will not be able
 to provide you with a SHA1.
 
 To add the extra versioning information when building from git, the
-`hack/build-go.sh` script will gather that information (using `git describe` and
+`make` build will gather that information (using `git describe` and
 `git rev-parse`) and then create a `-ldflags` string to pass to `go install` and
 tell the Go linker to override the contents of those variables at build time. It
 can, for instance, tell it to override `gitVersion` and set it to

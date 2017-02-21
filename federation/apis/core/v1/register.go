@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -40,9 +40,13 @@ func AddToScheme(scheme *runtime.Scheme) {
 func addKnownTypes(scheme *runtime.Scheme) {
 	scheme.AddKnownTypes(SchemeGroupVersion,
 		&v1.Service{},
+		&v1.Namespace{},
+		&v1.NamespaceList{},
 		&v1.ServiceList{},
 		&v1.ListOptions{},
 		&v1.DeleteOptions{},
+		&v1.Secret{},
+		&v1.SecretList{},
 	)
 
 	// Add common types

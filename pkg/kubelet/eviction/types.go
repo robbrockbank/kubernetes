@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright 2016 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -30,6 +30,22 @@ type Signal string
 const (
 	// SignalMemoryAvailable is memory available (i.e. capacity - workingSet), in bytes.
 	SignalMemoryAvailable Signal = "memory.available"
+	// SignalNodeFsAvailable is amount of storage available on filesystem that kubelet uses for volumes, daemon logs, etc.
+	SignalNodeFsAvailable Signal = "nodefs.available"
+	// SignalImageFsAvailable is amount of storage available on filesystem that container runtime uses for storing images and container writable layers.
+	SignalImageFsAvailable Signal = "imagefs.available"
+)
+
+// fsStatsType defines the types of filesystem stats to collect.
+type fsStatsType string
+
+const (
+	// fsStatsLocalVolumeSource identifies stats for pod local volume sources.
+	fsStatsLocalVolumeSource fsStatsType = "localVolumeSource"
+	// fsStatsLogs identifies stats for pod logs.
+	fsStatsLogs fsStatsType = "logs"
+	// fsStatsRoot identifies stats for pod container writable layers.
+	fsStatsRoot fsStatsType = "root"
 )
 
 // ThresholdOperator is the operator used to express a Threshold.
@@ -44,6 +60,8 @@ const (
 type Config struct {
 	// PressureTransitionPeriod is duration the kubelet has to wait before transititioning out of a pressure condition.
 	PressureTransitionPeriod time.Duration
+	// Maximum allowed grace period (in seconds) to use when terminating pods in response to a soft eviction threshold being met.
+	MaxPodGracePeriodSeconds int64
 	// Thresholds define the set of conditions monitored to trigger eviction.
 	Thresholds []Threshold
 }
@@ -55,18 +73,35 @@ type Threshold struct {
 	// Operator represents a relationship of a signal to a value.
 	Operator ThresholdOperator
 	// value is a quantity associated with the signal that is evaluated against the specified operator.
-	Value resource.Quantity
+	Value *resource.Quantity
 	// GracePeriod represents the amount of time that a threshold must be met before eviction is triggered.
 	GracePeriod time.Duration
+	// MinReclaim represents the minimum amount of resource to reclaim if the threshold is met.
+	MinReclaim *resource.Quantity
 }
 
 // Manager evaluates when an eviction threshold for node stability has been met on the node.
 type Manager interface {
 	// Start starts the control loop to monitor eviction thresholds at specified interval.
-	Start(podFunc ActivePodsFunc, monitoringInterval time.Duration)
+	Start(diskInfoProvider DiskInfoProvider, podFunc ActivePodsFunc, monitoringInterval time.Duration) error
 
 	// IsUnderMemoryPressure returns true if the node is under memory pressure.
 	IsUnderMemoryPressure() bool
+
+	// IsUnderDiskPressure returns true if the node is under disk pressure.
+	IsUnderDiskPressure() bool
+}
+
+// DiskInfoProvider is responsible for informing the manager how disk is configured.
+type DiskInfoProvider interface {
+	// HasDedicatedImageFs returns true if the imagefs is on a separate device from the rootfs.
+	HasDedicatedImageFs() (bool, error)
+}
+
+// ImageGC is responsible for performing garbage collection of unused images.
+type ImageGC interface {
+	// DeleteUnusedImages deletes unused images and returns the number of bytes freed, or an error.
+	DeleteUnusedImages() (int64, error)
 }
 
 // KillPodFunc kills a pod.
@@ -88,10 +123,16 @@ type statsFunc func(pod *api.Pod) (statsapi.PodStats, bool)
 type rankFunc func(pods []*api.Pod, stats statsFunc)
 
 // signalObservations maps a signal to an observed quantity
-type signalObservations map[Signal]resource.Quantity
+type signalObservations map[Signal]*resource.Quantity
 
 // thresholdsObservedAt maps a threshold to a time that it was observed
 type thresholdsObservedAt map[Threshold]time.Time
 
 // nodeConditionsObservedAt maps a node condition to a time that it was observed
 type nodeConditionsObservedAt map[api.NodeConditionType]time.Time
+
+// nodeReclaimFunc is a function that knows how to reclaim a resource from the node without impacting pods.
+type nodeReclaimFunc func() (*resource.Quantity, error)
+
+// nodeReclaimFuncs is an ordered list of nodeReclaimFunc
+type nodeReclaimFuncs []nodeReclaimFunc

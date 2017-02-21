@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright 2016 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -28,11 +28,10 @@ import (
 	"k8s.io/kubernetes/pkg/util/validation/field"
 )
 
-// ValidatePetSetName can be used to check whether the given PetSet
-// name is valid.
+// ValidatePetSetName can be used to check whether the given PetSet name is valid.
 // Prefix indicates this name will be used as part of generation, in which case
 // trailing dashes are allowed.
-func ValidatePetSetName(name string, prefix bool) (bool, string) {
+func ValidatePetSetName(name string, prefix bool) []string {
 	// TODO: Validate that there's name for the suffix inserted by the pets.
 	// Currently this is just "-index". In the future we may allow a user
 	// specified list of suffixes and we need  to validate the longest one.

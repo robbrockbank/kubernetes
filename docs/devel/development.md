@@ -2,15 +2,15 @@
 
 <!-- BEGIN STRIP_FOR_RELEASE -->
 
-<img src="http://kubernetes.io/img/warning.png" alt="WARNING"
+<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
      width="25" height="25">
-<img src="http://kubernetes.io/img/warning.png" alt="WARNING"
+<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
      width="25" height="25">
-<img src="http://kubernetes.io/img/warning.png" alt="WARNING"
+<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
      width="25" height="25">
-<img src="http://kubernetes.io/img/warning.png" alt="WARNING"
+<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
      width="25" height="25">
-<img src="http://kubernetes.io/img/warning.png" alt="WARNING"
+<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
      width="25" height="25">
 
 <h2>PLEASE NOTE: This document applies to the HEAD of the source tree</h2>
@@ -21,7 +21,7 @@ refer to the docs that go with that version.
 <!-- TAG RELEASE_LINK, added by the munger automatically -->
 <strong>
 The latest release of this document can be found
-[here](http://releases.k8s.io/release-1.2/docs/devel/development.md).
+[here](http://releases.k8s.io/release-1.3/docs/devel/development.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -50,6 +50,14 @@ Official releases are built using Docker containers. To build Kubernetes using
 Docker please follow [these
 instructions](http://releases.k8s.io/HEAD/build/README.md).
 
+### Local OS/shell environment
+
+Many of the Kubernetes development helper scripts rely on a fairly up-to-date GNU tools
+environment, so most recent Linux distros should work just fine
+out-of-the-box.  Note that Mac OS X ships with somewhat outdated
+BSD-based tools, some of which may be incompatible in subtle ways, so we recommend
+[replacing those with modern GNU tools](https://www.topbug.net/blog/2013/04/14/install-and-use-gnu-command-line-tools-in-mac-os-x/).
+
 ### Go development environment
 
 Kubernetes is written in the [Go](http://golang.org) programming language.
@@ -63,11 +71,22 @@ up a GOPATH.
 To build Kubernetes using your local Go development environment (generate linux
 binaries):
 
-        hack/build-go.sh
-You may pass build options and packages to the script as necessary. To build
-binaries for all platforms:
+```sh
+        make
+```
 
-        hack/build-cross.sh
+You may pass build options and packages to the script as necessary. For example,
+to build with optimizations disabled for enabling use of source debug tools:
+
+```sh
+        make GOGCFLAGS="-N -l"
+```
+
+To build binaries for all platforms:
+
+```sh
+        make cross
+```
 
 ## Workflow
 
@@ -145,7 +164,7 @@ git push -f origin myfeature
 ### Creating a pull request
 
 1. Visit https://github.com/$YOUR_GITHUB_USERNAME/kubernetes
-2. Click the "Compare and pull request" button next to your "myfeature" branch.
+2. Click the "Compare & pull request" button next to your "myfeature" branch.
 3. Check out the pull request [process](pull-requests.md) for more details
 
 ### When to retain commits and when to squash
@@ -222,9 +241,9 @@ separate dependency updates from other changes._
 
 ```sh
 export KPATH=$HOME/code/kubernetes
-mkdir -p $KPATH/src/k8s.io/kubernetes
-cd $KPATH/src/k8s.io/kubernetes
-git clone https://path/to/your/fork .
+mkdir -p $KPATH/src/k8s.io
+cd $KPATH/src/k8s.io
+git clone https://github.com/$YOUR_GITHUB_USERNAME/kubernetes.git # assumes your fork is 'kubernetes'
 # Or copy your existing local repo here. IMPORTANT: making a symlink doesn't work.
 ```
 
@@ -306,12 +325,13 @@ Three basic commands let you run unit, integration and/or e2e tests:
 
 ```sh
 cd kubernetes
-hack/test-go.sh  # Run unit tests
-hack/test-integration.sh  # Run integration tests, requires etcd
-go run hack/e2e.go -v --build --up --test --down  # Run e2e tests
+make test # Run every unit test
+make test WHAT=pkg/util/cache GOFLAGS=-v # Run tests of a package verbosely
+make test-integration # Run integration tests, requires etcd
+make test-e2e # Run e2e tests
 ```
 
-See the [testing guide](testing.md) for additional information and scenarios.
+See the [testing guide](testing.md) and [end-to-end tests](e2e-tests.md) for additional information and scenarios.
 
 ## Regenerating the CLI documentation
 

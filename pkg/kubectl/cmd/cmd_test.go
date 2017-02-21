@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -41,7 +41,7 @@ import (
 	"k8s.io/kubernetes/pkg/kubectl/resource"
 	"k8s.io/kubernetes/pkg/runtime"
 	"k8s.io/kubernetes/pkg/runtime/serializer"
-	"k8s.io/kubernetes/pkg/util"
+	"k8s.io/kubernetes/pkg/util/strings"
 )
 
 func initTestErrorHandler(t *testing.T) {
@@ -190,13 +190,16 @@ type testFactory struct {
 	Err          error
 }
 
-func NewTestFactory() (*cmdutil.Factory, *testFactory, runtime.Codec) {
+func NewTestFactory() (*cmdutil.Factory, *testFactory, runtime.Codec, runtime.NegotiatedSerializer) {
 	scheme, mapper, codec := newExternalScheme()
 	t := &testFactory{
 		Validator: validation.NullSchema{},
 		Mapper:    mapper,
 		Typer:     scheme,
 	}
+	negotiatedSerializer := serializer.NegotiatedSerializerWrapper(
+		runtime.SerializerInfo{Serializer: codec},
+		runtime.StreamSerializerInfo{})
 	return &cmdutil.Factory{
 		Object: func(discovery bool) (meta.RESTMapper, runtime.ObjectTyper) {
 			priorityRESTMapper := meta.PriorityRESTMapper{
@@ -222,7 +225,7 @@ func NewTestFactory() (*cmdutil.Factory, *testFactory, runtime.Codec) {
 		Describer: func(*meta.RESTMapping) (kubectl.Describer, error) {
 			return t.Describer, t.Err
 		},
-		Printer: func(mapping *meta.RESTMapping, noHeaders, withNamespace bool, wide bool, showAll bool, showLabels bool, absoluteTimestamps bool, columnLabels []string) (kubectl.ResourcePrinter, error) {
+		Printer: func(mapping *meta.RESTMapping, options kubectl.PrintOptions) (kubectl.ResourcePrinter, error) {
 			return t.Printer, t.Err
 		},
 		Validator: func(validate bool, cacheDir string) (validation.Schema, error) {
@@ -234,11 +237,11 @@ func NewTestFactory() (*cmdutil.Factory, *testFactory, runtime.Codec) {
 		ClientConfig: func() (*restclient.Config, error) {
 			return t.ClientConfig, t.Err
 		},
-	}, t, codec
+	}, t, codec, negotiatedSerializer
 }
 
 func NewMixedFactory(apiClient resource.RESTClient) (*cmdutil.Factory, *testFactory, runtime.Codec) {
-	f, t, c := NewTestFactory()
+	f, t, c, _ := NewTestFactory()
 	var multiRESTMapper meta.MultiRESTMapper
 	multiRESTMapper = append(multiRESTMapper, t.Mapper)
 	multiRESTMapper = append(multiRESTMapper, testapi.Default.RESTMapper())
@@ -263,7 +266,7 @@ func NewMixedFactory(apiClient resource.RESTClient) (*cmdutil.Factory, *testFact
 	return f, t, c
 }
 
-func NewAPIFactory() (*cmdutil.Factory, *testFactory, runtime.Codec) {
+func NewAPIFactory() (*cmdutil.Factory, *testFactory, runtime.Codec, runtime.NegotiatedSerializer) {
 	t := &testFactory{
 		Validator: validation.NullSchema{},
 	}
@@ -292,7 +295,7 @@ func NewAPIFactory() (*cmdutil.Factory, *testFactory, runtime.Codec) {
 		Describer: func(*meta.RESTMapping) (kubectl.Describer, error) {
 			return t.Describer, t.Err
 		},
-		Printer: func(mapping *meta.RESTMapping, noHeaders, withNamespace bool, wide bool, showAll bool, showLabels bool, absoluteTimestamps bool, columnLabels []string) (kubectl.ResourcePrinter, error) {
+		Printer: func(mapping *meta.RESTMapping, options kubectl.PrintOptions) (kubectl.ResourcePrinter, error) {
 			return t.Printer, t.Err
 		},
 		Validator: func(validate bool, cacheDir string) (validation.Schema, error) {
@@ -320,11 +323,11 @@ func NewAPIFactory() (*cmdutil.Factory, *testFactory, runtime.Codec) {
 				}
 				return c.Pods(t.Namespace).GetLogs(t.Name, opts), nil
 			default:
-				fqKind, err := api.Scheme.ObjectKind(object)
+				fqKinds, _, err := api.Scheme.ObjectKinds(object)
 				if err != nil {
 					return nil, err
 				}
-				return nil, fmt.Errorf("cannot get the logs from %v", fqKind)
+				return nil, fmt.Errorf("cannot get the logs from %v", fqKinds[0])
 			}
 		},
 	}
@@ -334,7 +337,8 @@ func NewAPIFactory() (*cmdutil.Factory, *testFactory, runtime.Codec) {
 	f.ProtocolsForObject = rf.ProtocolsForObject
 	f.LabelsForObject = rf.LabelsForObject
 	f.CanBeExposed = rf.CanBeExposed
-	return f, t, testapi.Default.Codec()
+	f.PrintObjectSpecificMessage = rf.PrintObjectSpecificMessage
+	return f, t, testapi.Default.Codec(), testapi.Default.NegotiatedSerializer()
 }
 
 func objBody(codec runtime.Codec, obj runtime.Object) io.ReadCloser {
@@ -366,11 +370,14 @@ func stringBody(body string) io.ReadCloser {
 //}
 
 func Example_printReplicationControllerWithNamespace() {
-	f, tf, codec := NewAPIFactory()
-	tf.Printer = kubectl.NewHumanReadablePrinter(false, true, false, false, false, false, []string{})
+	f, tf, _, ns := NewAPIFactory()
+	tf.Printer = kubectl.NewHumanReadablePrinter(kubectl.PrintOptions{
+		WithNamespace: true,
+		ColumnLabels:  []string{},
+	})
 	tf.Client = &fake.RESTClient{
-		Codec:  codec,
-		Client: nil,
+		NegotiatedSerializer: ns,
+		Client:               nil,
 	}
 	cmd := NewCmdRun(f, os.Stdin, os.Stdout, os.Stderr)
 	ctrl := &api.ReplicationController{
@@ -412,11 +419,14 @@ func Example_printReplicationControllerWithNamespace() {
 }
 
 func Example_printMultiContainersReplicationControllerWithWide() {
-	f, tf, codec := NewAPIFactory()
-	tf.Printer = kubectl.NewHumanReadablePrinter(false, false, true, false, false, false, []string{})
+	f, tf, _, ns := NewAPIFactory()
+	tf.Printer = kubectl.NewHumanReadablePrinter(kubectl.PrintOptions{
+		Wide:         true,
+		ColumnLabels: []string{},
+	})
 	tf.Client = &fake.RESTClient{
-		Codec:  codec,
-		Client: nil,
+		NegotiatedSerializer: ns,
+		Client:               nil,
 	}
 	cmd := NewCmdRun(f, os.Stdin, os.Stdout, os.Stderr)
 	ctrl := &api.ReplicationController{
@@ -461,11 +471,13 @@ func Example_printMultiContainersReplicationControllerWithWide() {
 }
 
 func Example_printReplicationController() {
-	f, tf, codec := NewAPIFactory()
-	tf.Printer = kubectl.NewHumanReadablePrinter(false, false, false, false, false, false, []string{})
+	f, tf, _, ns := NewAPIFactory()
+	tf.Printer = kubectl.NewHumanReadablePrinter(kubectl.PrintOptions{
+		ColumnLabels: []string{},
+	})
 	tf.Client = &fake.RESTClient{
-		Codec:  codec,
-		Client: nil,
+		NegotiatedSerializer: ns,
+		Client:               nil,
 	}
 	cmd := NewCmdRun(f, os.Stdin, os.Stdout, os.Stderr)
 	ctrl := &api.ReplicationController{
@@ -510,11 +522,14 @@ func Example_printReplicationController() {
 }
 
 func Example_printPodWithWideFormat() {
-	f, tf, codec := NewAPIFactory()
-	tf.Printer = kubectl.NewHumanReadablePrinter(false, false, true, false, false, false, []string{})
+	f, tf, _, ns := NewAPIFactory()
+	tf.Printer = kubectl.NewHumanReadablePrinter(kubectl.PrintOptions{
+		Wide:         true,
+		ColumnLabels: []string{},
+	})
 	tf.Client = &fake.RESTClient{
-		Codec:  codec,
-		Client: nil,
+		NegotiatedSerializer: ns,
+		Client:               nil,
 	}
 	nodeName := "kubernetes-minion-abcd"
 	cmd := NewCmdRun(f, os.Stdin, os.Stdout, os.Stderr)
@@ -547,11 +562,14 @@ func Example_printPodWithWideFormat() {
 }
 
 func Example_printPodWithShowLabels() {
-	f, tf, codec := NewAPIFactory()
-	tf.Printer = kubectl.NewHumanReadablePrinter(false, false, false, false, true, false, []string{})
+	f, tf, _, ns := NewAPIFactory()
+	tf.Printer = kubectl.NewHumanReadablePrinter(kubectl.PrintOptions{
+		ShowLabels:   true,
+		ColumnLabels: []string{},
+	})
 	tf.Client = &fake.RESTClient{
-		Codec:  codec,
-		Client: nil,
+		NegotiatedSerializer: ns,
+		Client:               nil,
 	}
 	nodeName := "kubernetes-minion-abcd"
 	cmd := NewCmdRun(f, os.Stdin, os.Stdout, os.Stderr)
@@ -679,11 +697,13 @@ func newAllPhasePodList() *api.PodList {
 }
 
 func Example_printPodHideTerminated() {
-	f, tf, codec := NewAPIFactory()
-	tf.Printer = kubectl.NewHumanReadablePrinter(false, false, false, false, false, false, []string{})
+	f, tf, _, ns := NewAPIFactory()
+	tf.Printer = kubectl.NewHumanReadablePrinter(kubectl.PrintOptions{
+		ColumnLabels: []string{},
+	})
 	tf.Client = &fake.RESTClient{
-		Codec:  codec,
-		Client: nil,
+		NegotiatedSerializer: ns,
+		Client:               nil,
 	}
 	cmd := NewCmdRun(f, os.Stdin, os.Stdout, os.Stderr)
 	podList := newAllPhasePodList()
@@ -700,11 +720,14 @@ func Example_printPodHideTerminated() {
 }
 
 func Example_printPodShowAll() {
-	f, tf, codec := NewAPIFactory()
-	tf.Printer = kubectl.NewHumanReadablePrinter(false, false, false, true, false, false, []string{})
+	f, tf, _, ns := NewAPIFactory()
+	tf.Printer = kubectl.NewHumanReadablePrinter(kubectl.PrintOptions{
+		ShowAll:      true,
+		ColumnLabels: []string{},
+	})
 	tf.Client = &fake.RESTClient{
-		Codec:  codec,
-		Client: nil,
+		NegotiatedSerializer: ns,
+		Client:               nil,
 	}
 	cmd := NewCmdRun(f, os.Stdin, os.Stdout, os.Stderr)
 	podList := newAllPhasePodList()
@@ -723,11 +746,14 @@ func Example_printPodShowAll() {
 }
 
 func Example_printServiceWithNamespacesAndLabels() {
-	f, tf, codec := NewAPIFactory()
-	tf.Printer = kubectl.NewHumanReadablePrinter(false, true, false, false, false, false, []string{"l1"})
+	f, tf, _, ns := NewAPIFactory()
+	tf.Printer = kubectl.NewHumanReadablePrinter(kubectl.PrintOptions{
+		WithNamespace: true,
+		ColumnLabels:  []string{"l1"},
+	})
 	tf.Client = &fake.RESTClient{
-		Codec:  codec,
-		Client: nil,
+		NegotiatedSerializer: ns,
+		Client:               nil,
 	}
 	cmd := NewCmdRun(f, os.Stdin, os.Stdout, os.Stderr)
 	svc := &api.ServiceList{
@@ -775,7 +801,7 @@ func Example_printServiceWithNamespacesAndLabels() {
 				Status: api.ServiceStatus{},
 			}},
 	}
-	ld := util.NewLineDelimiter(os.Stdout, "|")
+	ld := strings.NewLineDelimiter(os.Stdout, "|")
 	defer ld.Flush()
 
 	mapper, _ := f.Object(false)

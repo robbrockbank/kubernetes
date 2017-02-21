@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package authenticator
 
 import (
 	"crypto/rsa"
+	"time"
 
 	"k8s.io/kubernetes/pkg/auth/authenticator"
 	"k8s.io/kubernetes/pkg/auth/authenticator/bearertoken"
@@ -47,6 +48,7 @@ type AuthenticatorConfig struct {
 	ServiceAccountTokenGetter   serviceaccount.ServiceAccountTokenGetter
 	KeystoneURL                 string
 	WebhookTokenAuthnConfigFile string
+	WebhookTokenAuthnCacheTTL   time.Duration
 }
 
 // New returns an authenticator.Request or an error that supports the standard
@@ -103,7 +105,7 @@ func New(config AuthenticatorConfig) (authenticator.Request, error) {
 	}
 
 	if len(config.WebhookTokenAuthnConfigFile) > 0 {
-		webhookTokenAuth, err := newWebhookTokenAuthenticator(config.WebhookTokenAuthnConfigFile)
+		webhookTokenAuth, err := newWebhookTokenAuthenticator(config.WebhookTokenAuthnConfigFile, config.WebhookTokenAuthnCacheTTL)
 		if err != nil {
 			return nil, err
 		}
@@ -154,8 +156,6 @@ func newAuthenticatorFromOIDCIssuerURL(issuerURL, clientID, caFile, usernameClai
 		CAFile:        caFile,
 		UsernameClaim: usernameClaim,
 		GroupsClaim:   groupsClaim,
-		MaxRetries:    oidc.DefaultRetries,
-		RetryBackoff:  oidc.DefaultBackoff,
 	})
 	if err != nil {
 		return nil, err
@@ -198,8 +198,8 @@ func newAuthenticatorFromKeystoneURL(keystoneURL string) (authenticator.Request,
 	return basicauth.New(keystoneAuthenticator), nil
 }
 
-func newWebhookTokenAuthenticator(webhookConfigFile string) (authenticator.Request, error) {
-	webhookTokenAuthenticator, err := webhook.New(webhookConfigFile)
+func newWebhookTokenAuthenticator(webhookConfigFile string, ttl time.Duration) (authenticator.Request, error) {
+	webhookTokenAuthenticator, err := webhook.New(webhookConfigFile, ttl)
 	if err != nil {
 		return nil, err
 	}

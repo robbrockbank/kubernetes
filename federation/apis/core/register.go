@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright 2016 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -35,7 +35,7 @@ const GroupName = ""
 // SchemeGroupVersion is group version used to register these objects
 var SchemeGroupVersion = unversioned.GroupVersion{Group: GroupName, Version: runtime.APIVersionInternal}
 
-// Unversiond is group version for unversioned API objects
+// Unversioned is group version for unversioned API objects
 // TODO: this should be v1 probably
 var Unversioned = unversioned.GroupVersion{Group: "", Version: "v1"}
 
@@ -59,8 +59,12 @@ func AddToScheme(scheme *runtime.Scheme) {
 	scheme.AddKnownTypes(SchemeGroupVersion,
 		&api.ServiceList{},
 		&api.Service{},
+		&api.Namespace{},
+		&api.NamespaceList{},
 		&api.ListOptions{},
 		&api.DeleteOptions{},
+		&api.Secret{},
+		&api.SecretList{},
 	)
 
 	// Register Unversioned types under their own special group
@@ -72,4 +76,7 @@ func AddToScheme(scheme *runtime.Scheme) {
 		&unversioned.APIGroup{},
 		&unversioned.APIResourceList{},
 	)
+
+	addDefaultingFuncs(scheme)
+	addConversionFuncs(scheme)
 }
